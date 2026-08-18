@@ -1,0 +1,23 @@
+{
+    "name": "cultpantry/square-sync",
+    "description": "Bidirectional Square catalog and inventory synchronisation admin module.",
+    "type": "library",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.2",
+        "illuminate/support": "^12.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Cultpantry\\SquareSync\\": "src/",
+            "Cultpantry\\SquareSync\\Database\\Factories\\": "database/factories/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Cultpantry\\SquareSync\\SquareSyncServiceProvider"
+            ]
+        }
+    }
+}

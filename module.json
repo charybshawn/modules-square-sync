@@ -1,0 +1,12 @@
+{
+    "package": "cultpantry/square-sync",
+    "name": "Square Sync",
+    "description": "Keeps product catalog and inventory levels in agreement between the app and Square.",
+    "publish_tag": "square-sync-pages",
+    "provider": "Cultpantry\\SquareSync\\SquareSyncServiceProvider",
+    "tables": [
+        "square_object_mappings",
+        "square_webhook_events"
+    ],
+    "table_prefix": "square_"
+}
