@@ -18,6 +18,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response;
+use Throwable;
 
 class SquareSyncController extends Controller implements HasMiddleware
 {
@@ -78,11 +79,28 @@ class SquareSyncController extends Controller implements HasMiddleware
         // in depth.
         $this->authorize('sync', new SquareObjectMapping);
 
-        Artisan::call('square:reconcile');
+        return $this->runArtisanCommand('square:reconcile', [], 'Square reconcile check completed.');
+    }
 
-        $output = trim(Artisan::output());
+    /**
+     * Links Square catalog items to local products by SKU, via
+     * `php artisan square:pull-catalog` -- same Artisan::call() wrapper
+     * pattern as sync() above, not a reimplementation of its matching
+     * logic. dry_run previews matches without writing any
+     * SquareObjectMapping rows, mirroring the command's own --dry-run flag
+     * and giving the admin UI the same safe-by-default shape sync() has.
+     */
+    public function pullCatalog(Request $request): RedirectResponse
+    {
+        $this->authorize('sync', new SquareObjectMapping);
 
-        return redirect()->back()->with('success', $output !== '' ? $output : 'Square reconcile check completed.');
+        $dryRun = $request->boolean('dry_run');
+
+        return $this->runArtisanCommand(
+            'square:pull-catalog',
+            $dryRun ? ['--dry-run' => true] : [],
+            'Square catalog link check completed.',
+        );
     }
 
     /**
@@ -152,5 +170,28 @@ class SquareSyncController extends Controller implements HasMiddleware
         );
 
         return redirect()->back()->with('success', 'Square sync location updated.');
+    }
+
+    /**
+     * Shared by sync() and pullCatalog() -- both just wrap an Artisan
+     * command for this page's "Actions" menu. The commands themselves are
+     * deliberately allowed to let a SquareException bubble when run from
+     * the CLI (a failed hourly `square:reconcile` run should show up as a
+     * failed scheduled job for monitoring, not swallow the failure), but
+     * an admin clicking a button here should never see a raw stack trace
+     * just because Square rejected the request -- same "degrade to an
+     * empty/friendly result" tradeoff FetchSquareLocations already makes.
+     */
+    private function runArtisanCommand(string $command, array $parameters, string $fallbackMessage): RedirectResponse
+    {
+        try {
+            Artisan::call($command, $parameters);
+        } catch (Throwable $e) {
+            return redirect()->back()->with('warning', "Square request failed: {$e->getMessage()}");
+        }
+
+        $output = trim(Artisan::output());
+
+        return redirect()->back()->with('success', $output !== '' ? $output : $fallbackMessage);
     }
 }

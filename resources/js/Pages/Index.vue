@@ -8,20 +8,48 @@
             Catalog and inventory agreement between this app and Square.
           </p>
         </div>
-        <div class="mt-4 md:mt-0">
+        <!-- One "Actions" menu, not a growing row of buttons -- matches
+             DataTable's own Columns-dropdown pattern for consistency, and
+             scales cleanly as more maintenance actions get added here. -->
+        <div class="mt-4 md:mt-0 relative" ref="actionsMenuRef">
           <button
             type="button"
-            @click="runSyncCheck"
-            :disabled="syncForm.processing"
+            @click="showActionsMenu = !showActionsMenu"
+            :disabled="runningAction !== null"
             class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
           >
-            {{ syncForm.processing ? 'Running…' : 'Run Sync Check' }}
+            {{ actionsButtonLabel }}
+            <svg class="w-4 h-4 ml-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
           </button>
+
+          <div
+            v-if="showActionsMenu"
+            class="absolute right-0 z-10 mt-1 w-72 bg-white dark:bg-gray-700 rounded-md shadow-lg ring-1 ring-black ring-opacity-5 dark:ring-white/10 py-1"
+          >
+            <button type="button" @click="runSyncCheck" class="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600">
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">Run Sync Check</span>
+              <span class="block text-xs text-gray-500 dark:text-gray-400">Report inventory drift against Square -- no changes written</span>
+            </button>
+            <button type="button" @click="previewCatalogLink" class="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600">
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">Preview Catalog Link</span>
+              <span class="block text-xs text-gray-500 dark:text-gray-400">Show which Square items would link by SKU, without saving</span>
+            </button>
+            <button type="button" @click="linkCatalogNow" class="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600">
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">Link Catalog Now</span>
+              <span class="block text-xs text-gray-500 dark:text-gray-400">Write mappings for every matching SKU found</span>
+            </button>
+          </div>
         </div>
       </div>
 
       <div v-if="$page.props.flash?.success" class="rounded-md bg-green-50 dark:bg-green-900/20 p-4">
         <p class="text-sm font-medium text-green-800 dark:text-green-200 whitespace-pre-line">{{ $page.props.flash.success }}</p>
+      </div>
+
+      <div v-if="$page.props.flash?.warning" class="rounded-md bg-amber-50 dark:bg-amber-900/20 p-4">
+        <p class="text-sm font-medium text-amber-800 dark:text-amber-200 whitespace-pre-line">{{ $page.props.flash.warning }}</p>
       </div>
 
       <!-- Connection status -->
@@ -220,7 +248,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { router, useForm } from '@inertiajs/vue3'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
 import DataTable, { type Column } from '@/Components/Admin/DataTable.vue'
@@ -377,9 +405,64 @@ const unlinkMapping = (item: MappingRow) => {
   }
 }
 
+// One in-flight action at a time -- the trigger button's own label
+// reflects which of the three is running, so there's no separate spinner
+// state to keep in sync per menu item.
+const runningAction = ref<'sync' | 'preview' | 'link' | null>(null)
+
+const actionsButtonLabel = computed(() => {
+  switch (runningAction.value) {
+    case 'sync': return 'Running…'
+    case 'preview': return 'Previewing…'
+    case 'link': return 'Linking…'
+    default: return 'Actions'
+  }
+})
+
+const showActionsMenu = ref(false)
+const actionsMenuRef = ref<HTMLElement | null>(null)
+
+const onClickOutsideActionsMenu = (event: MouseEvent) => {
+  if (actionsMenuRef.value && !actionsMenuRef.value.contains(event.target as Node)) {
+    showActionsMenu.value = false
+  }
+}
+
+onMounted(() => document.addEventListener('click', onClickOutsideActionsMenu))
+onBeforeUnmount(() => document.removeEventListener('click', onClickOutsideActionsMenu))
+
 const syncForm = useForm({})
 
 const runSyncCheck = () => {
-  syncForm.post(route('admin.square.sync'), { preserveScroll: true })
+  showActionsMenu.value = false
+  runningAction.value = 'sync'
+  syncForm.post(route('admin.square.sync'), {
+    preserveScroll: true,
+    onFinish: () => { runningAction.value = null },
+  })
+}
+
+const pullCatalogForm = useForm({ dry_run: false })
+
+const previewCatalogLink = () => {
+  showActionsMenu.value = false
+  runningAction.value = 'preview'
+  pullCatalogForm.dry_run = true
+  pullCatalogForm.post(route('admin.square.pull-catalog'), {
+    preserveScroll: true,
+    onFinish: () => { runningAction.value = null },
+  })
+}
+
+const linkCatalogNow = () => {
+  showActionsMenu.value = false
+  if (!confirm('Link Square catalog items to local products by SKU now? This writes a mapping for every matching SKU found -- existing links are left untouched.')) return
+
+  runningAction.value = 'link'
+  pullCatalogForm.dry_run = false
+  pullCatalogForm.post(route('admin.square.pull-catalog'), {
+    preserveScroll: true,
+    onFinish: () => { runningAction.value = null },
+  })
 }
 </script>

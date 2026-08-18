@@ -20,6 +20,7 @@ Route::prefix('admin')
             Route::get('/', [SquareSyncController::class, 'index'])->name('index');
             Route::post('unlink/{mapping}', [SquareSyncController::class, 'unlink'])->name('unlink');
             Route::post('sync', [SquareSyncController::class, 'sync'])->name('sync');
+            Route::post('pull-catalog', [SquareSyncController::class, 'pullCatalog'])->name('pull-catalog');
             Route::post('location', [SquareSyncController::class, 'updateLocation'])->name('location');
         });
     });
