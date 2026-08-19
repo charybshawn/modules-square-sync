@@ -79,6 +79,17 @@ class ReconcileSquareInventory extends Command
             $localQuantity = $product->stock_quantity;
 
             if ($squareQuantity === $localQuantity) {
+                // Already in sync -- nothing to correct, but --fix did just
+                // successfully check this mapping against Square, and
+                // last_pulled_at should say so. Skipping this would leave a
+                // mapping that's never once drifted looking like it's never
+                // been checked at all (admin UI: "Last Pulled: Never"),
+                // which is exactly backwards from what a "Pull Inventory
+                // Now" click just did.
+                if ($fix) {
+                    $mapping->markPulled();
+                }
+
                 continue;
             }
 
