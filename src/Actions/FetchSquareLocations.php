@@ -39,7 +39,28 @@ class FetchSquareLocations
             return [];
         }
 
-        return Cache::remember(self::CACHE_KEY, self::CACHE_TTL, fn () => $this->fetch());
+        $cached = Cache::get(self::CACHE_KEY);
+
+        if (is_array($cached) && $cached !== []) {
+            return $cached;
+        }
+
+        $locations = $this->fetch();
+
+        // Deliberately not Cache::remember(): that caches whatever the
+        // callback returns, and fetch() returns [] on failure. Caching a
+        // failure means one bad call -- a page load before the token was
+        // configured, or a momentary Square outage -- keeps the admin page
+        // showing "locations could not be loaded" for the full TTL even
+        // after the underlying problem is fixed, with no way to clear it
+        // from the UI. Only a non-empty success is worth remembering; a
+        // genuinely location-less account just re-asks, which is harmless
+        // since Square accounts always have at least one.
+        if ($locations !== []) {
+            Cache::put(self::CACHE_KEY, $locations, self::CACHE_TTL);
+        }
+
+        return $locations;
     }
 
     /**
