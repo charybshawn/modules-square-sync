@@ -6,10 +6,13 @@ use App\Actions\GetSiteSetting;
 use App\Actions\RecordEvent;
 use App\Actions\UpdateSiteSetting;
 use App\Http\Controllers\Controller;
+use App\Models\Product;
 use Cultpantry\SquareSync\Actions\FetchSquareLocations;
 use Cultpantry\SquareSync\Actions\FetchSquareSyncData;
+use Cultpantry\SquareSync\Actions\FetchUnlinkedSquareCatalogItems;
 use Cultpantry\SquareSync\Actions\GetSquareLocationId;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controllers\HasMiddleware;
@@ -101,6 +104,64 @@ class SquareSyncController extends Controller implements HasMiddleware
             $dryRun ? ['--dry-run' => true] : [],
             'Square catalog link check completed.',
         );
+    }
+
+    /**
+     * On-demand JSON fetch of every Square catalog item not yet linked to a
+     * local product -- the data source for the admin page's manual-linking
+     * panel. A GET called from the frontend via axios rather than an
+     * Inertia prop (contrast index()'s other panels): walking the whole
+     * Square catalog is too heavy to redo on every page load the way
+     * FetchSquareLocations does, so it only runs when an admin actually
+     * clicks "Download Catalog".
+     *
+     * Errors are surfaced as JSON rather than an Inertia flash message --
+     * this response never goes through Inertia at all -- but the intent
+     * matches runArtisanCommand()'s: a failed Square call should read as a
+     * friendly message here, not a raw 500 in the browser console.
+     */
+    public function catalogItems(FetchUnlinkedSquareCatalogItems $fetchCatalogItems): JsonResponse
+    {
+        $this->authorize('sync', new SquareObjectMapping);
+
+        try {
+            $items = $fetchCatalogItems->handle();
+        } catch (Throwable $e) {
+            return response()->json(['error' => "Square request failed: {$e->getMessage()}"], 502);
+        }
+
+        return response()->json(['items' => $items]);
+    }
+
+    /**
+     * Manually pairs one Square catalog item (an ITEM_VARIATION, per the
+     * mapping table's own contract -- see SquareObjectMapping's class docs)
+     * with one local product, chosen by an admin from the catalog-items
+     * panel rather than matched automatically by SKU. Reuses linkTo()'s
+     * existing idempotent link/relink behavior, same as PullSquareCatalog's
+     * SKU-matched links -- there's only one way a mapping row gets created,
+     * manual or automatic.
+     */
+    public function link(Request $request): RedirectResponse
+    {
+        $this->authorize('sync', new SquareObjectMapping);
+
+        $validated = $request->validate([
+            'product_id' => ['required', 'integer', Rule::exists('products', 'id')],
+            'square_object_id' => ['required', 'string', 'max:191'],
+            'square_parent_object_id' => ['nullable', 'string', 'max:191'],
+        ]);
+
+        $product = Product::findOrFail($validated['product_id']);
+
+        SquareObjectMapping::linkTo(
+            $product,
+            $validated['square_object_id'],
+            'ITEM_VARIATION',
+            $validated['square_parent_object_id'] ?? null,
+        );
+
+        return redirect()->back()->with('success', "Linked '{$product->title}' to Square.");
     }
 
     /**

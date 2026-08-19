@@ -32,14 +32,6 @@
               <span class="block text-sm font-medium text-gray-900 dark:text-white">Run Sync Check</span>
               <span class="block text-xs text-gray-500 dark:text-gray-400">Report inventory drift against Square -- no changes written</span>
             </button>
-            <button type="button" @click="previewCatalogLink" class="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600">
-              <span class="block text-sm font-medium text-gray-900 dark:text-white">Preview Catalog Link</span>
-              <span class="block text-xs text-gray-500 dark:text-gray-400">Show which Square items would link by SKU, without saving</span>
-            </button>
-            <button type="button" @click="linkCatalogNow" class="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600">
-              <span class="block text-sm font-medium text-gray-900 dark:text-white">Link Catalog Now</span>
-              <span class="block text-xs text-gray-500 dark:text-gray-400">Write mappings for every matching SKU found</span>
-            </button>
           </div>
         </div>
       </div>
@@ -176,8 +168,7 @@
         <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
           <h2 class="text-lg font-medium text-gray-900 dark:text-white">Unmapped Products</h2>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Local products with no Square mapping yet. Link them by running <code class="text-xs">php artisan square:pull-catalog</code>,
-            which matches by SKU.
+            Local products with no Square mapping yet. Link them from the catalog panel below.
           </p>
         </div>
         <div v-if="unmappedProducts.items.length === 0" class="px-6 py-8 text-sm text-gray-500 dark:text-gray-400 text-center">
@@ -192,6 +183,68 @@
         <p v-if="unmappedProducts.total > unmappedProducts.items.length" class="px-6 py-3 text-xs text-gray-500 dark:text-gray-400 border-t border-gray-200 dark:border-gray-700">
           Showing {{ unmappedProducts.items.length }} of {{ unmappedProducts.total }}.
         </p>
+      </div>
+
+      <!-- Manual catalog linking -->
+      <div class="bg-white dark:bg-gray-800 shadow-sm rounded-lg overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between gap-4">
+          <div>
+            <h2 class="text-lg font-medium text-gray-900 dark:text-white">Link Square Catalog</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              Square catalog items with no local mapping yet. Pick the matching product and link them by hand.
+            </p>
+          </div>
+          <button
+            type="button"
+            @click="downloadCatalog"
+            :disabled="catalogLoading"
+            class="shrink-0 inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+          >
+            {{ catalogLoading ? 'Downloading…' : (catalogItems === null ? 'Download Catalog' : 'Refresh Catalog') }}
+          </button>
+        </div>
+
+        <p v-if="catalogError" class="px-6 py-3 text-sm text-red-600 dark:text-red-400">{{ catalogError }}</p>
+
+        <div v-if="catalogItems === null && !catalogLoading" class="px-6 py-8 text-sm text-gray-500 dark:text-gray-400 text-center">
+          Not downloaded yet -- click "Download Catalog" to fetch unlinked Square items.
+        </div>
+
+        <div v-else-if="catalogItems && catalogItems.length === 0" class="px-6 py-8 text-sm text-gray-500 dark:text-gray-400 text-center">
+          Every Square catalog item is already linked.
+        </div>
+
+        <ul v-else-if="catalogItems" class="divide-y divide-gray-200 dark:divide-gray-700">
+          <li
+            v-for="catalogItem in catalogItems"
+            :key="catalogItem.square_object_id"
+            class="px-6 py-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4"
+          >
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-medium text-gray-900 dark:text-white truncate">{{ catalogItem.name }}</div>
+              <div class="text-xs text-gray-500 dark:text-gray-400">{{ catalogItem.sku ?? 'no SKU' }}</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <select
+                v-model="linkSelections[catalogItem.square_object_id]"
+                class="block w-56 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+              >
+                <option value="">Select a product…</option>
+                <option v-for="product in unmappedProducts.items" :key="product.id" :value="product.id">
+                  {{ product.title }}{{ product.sku ? ` (${product.sku})` : '' }}
+                </option>
+              </select>
+              <button
+                type="button"
+                @click="linkCatalogItem(catalogItem)"
+                :disabled="!linkSelections[catalogItem.square_object_id] || linkForm.processing"
+                class="inline-flex items-center px-3 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+              >
+                Link
+              </button>
+            </div>
+          </li>
+        </ul>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -249,6 +302,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import axios from 'axios'
 import { router, useForm } from '@inertiajs/vue3'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
 import DataTable, { type Column } from '@/Components/Admin/DataTable.vue'
@@ -317,6 +371,13 @@ interface UnmappedProduct {
 interface UnmappedProducts {
   items: UnmappedProduct[]
   total: number
+}
+
+interface CatalogItemRow {
+  square_object_id: string
+  square_parent_object_id: string | null
+  name: string
+  sku: string | null
 }
 
 interface SquareEventRow {
@@ -406,15 +467,13 @@ const unlinkMapping = (item: MappingRow) => {
 }
 
 // One in-flight action at a time -- the trigger button's own label
-// reflects which of the three is running, so there's no separate spinner
-// state to keep in sync per menu item.
-const runningAction = ref<'sync' | 'preview' | 'link' | null>(null)
+// reflects which is running, so there's no separate spinner state to keep
+// in sync per menu item.
+const runningAction = ref<'sync' | null>(null)
 
 const actionsButtonLabel = computed(() => {
   switch (runningAction.value) {
     case 'sync': return 'Running…'
-    case 'preview': return 'Previewing…'
-    case 'link': return 'Linking…'
     default: return 'Actions'
   }
 })
@@ -442,27 +501,53 @@ const runSyncCheck = () => {
   })
 }
 
-const pullCatalogForm = useForm({ dry_run: false })
+// Downloaded catalog items live in local state, not an Inertia prop --
+// walking the whole Square catalog is too heavy to redo on every prop
+// refresh, so it's fetched once on demand and only ever updated by this
+// panel's own actions (a fresh download, or splicing out an item just
+// linked). null means "not downloaded yet", distinct from an empty array
+// ("downloaded, nothing left to link").
+const catalogItems = ref<CatalogItemRow[] | null>(null)
+const catalogLoading = ref(false)
+const catalogError = ref<string | null>(null)
+const linkSelections = ref<Record<string, string>>({})
 
-const previewCatalogLink = () => {
-  showActionsMenu.value = false
-  runningAction.value = 'preview'
-  pullCatalogForm.dry_run = true
-  pullCatalogForm.post(route('admin.square.pull-catalog'), {
-    preserveScroll: true,
-    onFinish: () => { runningAction.value = null },
-  })
+const downloadCatalog = async () => {
+  catalogLoading.value = true
+  catalogError.value = null
+  try {
+    const response = await axios.get(route('admin.square.catalog-items'))
+    catalogItems.value = response.data.items
+  } catch (error: any) {
+    catalogError.value = error?.response?.data?.error ?? 'Failed to download the Square catalog.'
+  } finally {
+    catalogLoading.value = false
+  }
 }
 
-const linkCatalogNow = () => {
-  showActionsMenu.value = false
-  if (!confirm('Link Square catalog items to local products by SKU now? This writes a mapping for every matching SKU found -- existing links are left untouched.')) return
+const linkForm = useForm({
+  product_id: '',
+  square_object_id: '',
+  square_parent_object_id: '',
+})
 
-  runningAction.value = 'link'
-  pullCatalogForm.dry_run = false
-  pullCatalogForm.post(route('admin.square.pull-catalog'), {
+const linkCatalogItem = (catalogItem: CatalogItemRow) => {
+  const productId = linkSelections.value[catalogItem.square_object_id]
+  if (!productId) return
+
+  linkForm.product_id = productId
+  linkForm.square_object_id = catalogItem.square_object_id
+  linkForm.square_parent_object_id = catalogItem.square_parent_object_id ?? ''
+
+  linkForm.post(route('admin.square.link'), {
     preserveScroll: true,
-    onFinish: () => { runningAction.value = null },
+    onSuccess: () => {
+      // unmappedProducts and mappings refresh automatically as part of the
+      // Inertia response; catalogItems is local state, so the linked row
+      // is removed here to match.
+      catalogItems.value = catalogItems.value?.filter((item) => item.square_object_id !== catalogItem.square_object_id) ?? null
+      delete linkSelections.value[catalogItem.square_object_id]
+    },
   })
 }
 </script>

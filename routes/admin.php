@@ -21,6 +21,8 @@ Route::prefix('admin')
             Route::post('unlink/{mapping}', [SquareSyncController::class, 'unlink'])->name('unlink');
             Route::post('sync', [SquareSyncController::class, 'sync'])->name('sync');
             Route::post('pull-catalog', [SquareSyncController::class, 'pullCatalog'])->name('pull-catalog');
+            Route::get('catalog-items', [SquareSyncController::class, 'catalogItems'])->name('catalog-items');
+            Route::post('link', [SquareSyncController::class, 'link'])->name('link');
             Route::post('location', [SquareSyncController::class, 'updateLocation'])->name('location');
         });
     });
