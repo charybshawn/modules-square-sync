@@ -32,6 +32,10 @@
               <span class="block text-sm font-medium text-gray-900 dark:text-white">Run Sync Check</span>
               <span class="block text-xs text-gray-500 dark:text-gray-400">Report inventory drift against Square -- no changes written</span>
             </button>
+            <button type="button" @click="pullInventoryNow" class="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600">
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">Pull Inventory Now</span>
+              <span class="block text-xs text-gray-500 dark:text-gray-400">Apply Square's inventory counts to local stock for every drifted product</span>
+            </button>
           </div>
         </div>
       </div>
@@ -469,11 +473,12 @@ const unlinkMapping = (item: MappingRow) => {
 // One in-flight action at a time -- the trigger button's own label
 // reflects which is running, so there's no separate spinner state to keep
 // in sync per menu item.
-const runningAction = ref<'sync' | null>(null)
+const runningAction = ref<'sync' | 'pull-inventory' | null>(null)
 
 const actionsButtonLabel = computed(() => {
   switch (runningAction.value) {
     case 'sync': return 'Running…'
+    case 'pull-inventory': return 'Pulling…'
     default: return 'Actions'
   }
 })
@@ -496,6 +501,19 @@ const runSyncCheck = () => {
   showActionsMenu.value = false
   runningAction.value = 'sync'
   syncForm.post(route('admin.square.sync'), {
+    preserveScroll: true,
+    onFinish: () => { runningAction.value = null },
+  })
+}
+
+const pullInventoryForm = useForm({})
+
+const pullInventoryNow = () => {
+  showActionsMenu.value = false
+  if (!confirm("Apply Square's inventory counts to local stock now? This overwrites local stock for every product that's drifted from Square.")) return
+
+  runningAction.value = 'pull-inventory'
+  pullInventoryForm.post(route('admin.square.pull-inventory'), {
     preserveScroll: true,
     onFinish: () => { runningAction.value = null },
   })

@@ -68,8 +68,7 @@ class SquareSyncController extends Controller implements HasMiddleware
      * schedule runs, via Artisan::call() rather than reimplementing any of
      * its drift-detection logic here (see ReconcileSquareInventory).
      * Report-only by default -- no --fix -- matching the command's own
-     * safe default; a destructive "fix everything" button is a bigger
-     * decision than this page currently offers.
+     * safe default. See pullInventory() below for the --fix counterpart.
      */
     public function sync(): RedirectResponse
     {
@@ -83,6 +82,22 @@ class SquareSyncController extends Controller implements HasMiddleware
         $this->authorize('sync', new SquareObjectMapping);
 
         return $this->runArtisanCommand('square:reconcile', [], 'Square reconcile check completed.');
+    }
+
+    /**
+     * Applies every drifted product's Square inventory count to local
+     * stock_quantity, via `php artisan square:reconcile --fix` -- same
+     * Artisan::call() wrapper as sync(), just with the command's
+     * correction flag on. This is the manual escape hatch for whatever the
+     * inventory.count.updated webhook missed (a dropped delivery, a count
+     * made before this module was installed) without waiting on the
+     * webhook or reaching for CLI access.
+     */
+    public function pullInventory(): RedirectResponse
+    {
+        $this->authorize('sync', new SquareObjectMapping);
+
+        return $this->runArtisanCommand('square:reconcile', ['--fix' => true], 'Square inventory pull completed -- no drift found.');
     }
 
     /**
