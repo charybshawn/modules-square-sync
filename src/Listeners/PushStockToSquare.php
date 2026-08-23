@@ -45,11 +45,15 @@ class PushStockToSquare implements ShouldQueue
             return;
         }
 
-        // The echo-loop break: a change that came FROM Square (applied by
-        // ApplyInventoryCountFromSquare with this exact reason) must never
-        // be pushed straight back, or the two systems ping-pong the same
-        // write forever.
-        if ($event->reason === SyncInventory::REASONS['SQUARE_PULL']) {
+        // The echo-loop break: a change that came FROM Square -- either the
+        // ongoing passive sync (ApplyInventoryCountFromSquare, reconcile)
+        // or a one-time admin-confirmed "trust Square" choice at link time
+        // -- must never be pushed straight back, or the two systems
+        // ping-pong the same write forever.
+        if (in_array($event->reason, [
+            SyncInventory::REASONS['SQUARE_PULL'],
+            SyncInventory::REASONS['SQUARE_INITIAL_SYNC'],
+        ], true)) {
             return;
         }
 

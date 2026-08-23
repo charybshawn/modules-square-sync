@@ -4,9 +4,11 @@ namespace Cultpantry\SquareSync\Http\Controllers\Admin;
 
 use App\Actions\GetSiteSetting;
 use App\Actions\RecordEvent;
+use App\Actions\SyncInventory;
 use App\Actions\UpdateSiteSetting;
 use App\Http\Controllers\Controller;
 use App\Models\Product;
+use Cultpantry\SquareSync\Actions\FetchSquareInventoryCount;
 use Cultpantry\SquareSync\Actions\FetchSquareLocations;
 use Cultpantry\SquareSync\Actions\FetchSquareSyncData;
 use Cultpantry\SquareSync\Actions\FetchUnlinkedSquareCatalogItems;
@@ -150,6 +152,41 @@ class SquareSyncController extends Controller implements HasMiddleware
     }
 
     /**
+     * Read-only preview for the linking modal: local stock vs. Square's
+     * live count for the candidate catalog object, so an admin can see
+     * both numbers before choosing which one becomes the starting truth.
+     * Makes no changes -- no mapping created, no stock touched. This is
+     * what dry-runs the choice link() below actually commits.
+     */
+    public function linkPreview(Request $request, FetchSquareInventoryCount $fetchSquareInventoryCount): JsonResponse
+    {
+        $this->authorize('sync', new SquareObjectMapping);
+
+        $validated = $request->validate([
+            'product_id' => ['required', 'integer', Rule::exists('products', 'id')],
+            'square_object_id' => ['required', 'string', 'max:191'],
+        ]);
+
+        $product = Product::findOrFail($validated['product_id']);
+
+        if (! $product->track_inventory) {
+            return response()->json(['track_inventory' => false]);
+        }
+
+        try {
+            $squareQuantity = $fetchSquareInventoryCount->handle($validated['square_object_id']);
+        } catch (Throwable $e) {
+            return response()->json(['error' => "Square request failed: {$e->getMessage()}"], 502);
+        }
+
+        return response()->json([
+            'track_inventory' => true,
+            'local_quantity' => $product->stock_quantity,
+            'square_quantity' => $squareQuantity,
+        ]);
+    }
+
+    /**
      * Manually pairs one Square catalog item (an ITEM_VARIATION, per the
      * mapping table's own contract -- see SquareObjectMapping's class docs)
      * with one local product, chosen by an admin from the catalog-items
@@ -158,20 +195,20 @@ class SquareSyncController extends Controller implements HasMiddleware
      * SKU-matched links -- there's only one way a mapping row gets created,
      * manual or automatic.
      *
-     * Immediately pushes the product's current stock_quantity to Square as
-     * the starting baseline (same PHYSICAL_COUNT job the outbound
-     * StockUpdated listener uses). Without this, a freshly-linked item sits
-     * at whatever Square already had for that catalog object -- typically
-     * untracked/0 for a brand-new item -- until *something* changes stock
-     * locally again. In the meantime, SyncInventory::applyChange()'s
-     * SQUARE_PULL guard only rejects an *increase* from Square; a 0 read
-     * as genuinely lower than real local stock, so an inbound webhook or a
-     * `square:reconcile --fix` run in that window would apply it as a
-     * legitimate decrease and wipe the real count out. Pushing first closes
-     * that gap by making Square's count correct before anything can pull
-     * from it.
+     * For a tracked product, the admin must say which side is correct for
+     * this product's starting count -- inventory_source: 'local' pushes
+     * the current stock_quantity to Square as the baseline (see
+     * linkPreview() for why a freshly-linked item can't just be left alone:
+     * without a push, it sits at whatever Square already had -- typically
+     * 0 for a brand-new catalog object -- and the SQUARE_PULL increase-guard
+     * only protects against a later *increase*, not this initial gap, so an
+     * inbound webhook or reconcile could apply that stale 0 as a legitimate
+     * decrease first). 'square' does the reverse: pulls Square's current
+     * count and applies it locally via SQUARE_INITIAL_SYNC, a reason
+     * distinct from SQUARE_PULL specifically so the increase-guard doesn't
+     * block this deliberate, admin-confirmed choice.
      */
-    public function link(Request $request): RedirectResponse
+    public function link(Request $request, FetchSquareInventoryCount $fetchSquareInventoryCount): RedirectResponse
     {
         $this->authorize('sync', new SquareObjectMapping);
 
@@ -179,6 +216,7 @@ class SquareSyncController extends Controller implements HasMiddleware
             'product_id' => ['required', 'integer', Rule::exists('products', 'id')],
             'square_object_id' => ['required', 'string', 'max:191'],
             'square_parent_object_id' => ['nullable', 'string', 'max:191'],
+            'inventory_source' => ['nullable', Rule::in(['local', 'square'])],
         ]);
 
         $product = Product::findOrFail($validated['product_id']);
@@ -192,12 +230,37 @@ class SquareSyncController extends Controller implements HasMiddleware
 
         $message = "Linked '{$product->title}' to Square.";
 
-        if ($product->track_inventory) {
-            PushInventoryCountJob::dispatch($product->id, $product->stock_quantity)->afterCommit();
-            $message = "Linked '{$product->title}' to Square -- pushing current stock ({$product->stock_quantity}) as the baseline.";
+        if (! $product->track_inventory) {
+            return redirect()->back()->with('success', $message);
         }
 
-        return redirect()->back()->with('success', $message);
+        $source = $validated['inventory_source'] ?? 'local';
+
+        if ($source === 'local') {
+            PushInventoryCountJob::dispatch($product->id, $product->stock_quantity)->afterCommit();
+            $message = "Linked '{$product->title}' to Square -- pushing current stock ({$product->stock_quantity}) as the baseline.";
+
+            return redirect()->back()->with('success', $message);
+        }
+
+        try {
+            $squareQuantity = $fetchSquareInventoryCount->handle($validated['square_object_id']);
+        } catch (Throwable $e) {
+            return redirect()->back()->with('warning', "Linked '{$product->title}' to Square, but couldn't fetch Square's current count: {$e->getMessage()}. Stock levels are out of sync until you pull inventory.");
+        }
+
+        app(SyncInventory::class)->applyChange(
+            product: $product,
+            newQuantity: $squareQuantity,
+            reason: SyncInventory::REASONS['SQUARE_INITIAL_SYNC'],
+            actor: $request->user(),
+            metadata: [
+                'square_object_id' => $validated['square_object_id'],
+                'source' => 'link_initial_sync',
+            ],
+        );
+
+        return redirect()->back()->with('success', "Linked '{$product->title}' to Square -- set local stock to Square's count ({$squareQuantity}).");
     }
 
     /**

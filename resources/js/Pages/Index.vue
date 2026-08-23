@@ -209,6 +209,7 @@
         </div>
 
         <p v-if="catalogError" class="px-6 py-3 text-sm text-red-600 dark:text-red-400">{{ catalogError }}</p>
+        <p v-if="linkPreviewError" class="px-6 py-3 text-sm text-red-600 dark:text-red-400">{{ linkPreviewError }}</p>
 
         <div v-if="catalogItems === null && !catalogLoading" class="px-6 py-8 text-sm text-gray-500 dark:text-gray-400 text-center">
           Not downloaded yet -- click "Download Catalog" to fetch unlinked Square items.
@@ -241,10 +242,10 @@
               <button
                 type="button"
                 @click="linkCatalogItem(catalogItem)"
-                :disabled="!linkSelections[catalogItem.square_object_id] || linkForm.processing"
+                :disabled="!linkSelections[catalogItem.square_object_id] || linkForm.processing || linkPreviewLoading"
                 class="inline-flex items-center px-3 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
               >
-                Link
+                {{ linkPreviewLoading ? 'Checking…' : 'Link' }}
               </button>
             </div>
           </li>
@@ -301,6 +302,46 @@
         </div>
       </div>
     </div>
+
+    <Modal :show="showLinkSourceModal" max-width="lg" @close="cancelLinkSource">
+      <div v-if="linkPreviewData && linkPreviewCatalogItem" class="p-6">
+        <h2 class="text-lg font-medium text-gray-900 dark:text-white">Which inventory is correct?</h2>
+        <p class="mt-1 text-sm text-gray-600 dark:text-gray-400">
+          Linking "{{ linkPreviewCatalogItem.name }}" for the first time. Pick which count is the real one right now — the other side gets overwritten to match.
+        </p>
+
+        <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <button
+            type="button"
+            @click="chooseInventorySource('local')"
+            class="text-left rounded-lg border-2 border-gray-300 dark:border-gray-600 p-4 hover:border-indigo-500 dark:hover:border-indigo-400 transition-colors"
+          >
+            <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Local App</div>
+            <div class="mt-1 text-3xl font-bold text-gray-900 dark:text-white">{{ linkPreviewData.local_quantity }}</div>
+            <div class="mt-2 text-xs text-gray-500 dark:text-gray-400">Use this — pushes {{ linkPreviewData.local_quantity }} to Square.</div>
+          </button>
+          <button
+            type="button"
+            @click="chooseInventorySource('square')"
+            class="text-left rounded-lg border-2 border-gray-300 dark:border-gray-600 p-4 hover:border-indigo-500 dark:hover:border-indigo-400 transition-colors"
+          >
+            <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Square</div>
+            <div class="mt-1 text-3xl font-bold text-gray-900 dark:text-white">{{ linkPreviewData.square_quantity }}</div>
+            <div class="mt-2 text-xs text-gray-500 dark:text-gray-400">Use this — sets local stock to {{ linkPreviewData.square_quantity }}.</div>
+          </button>
+        </div>
+
+        <div class="mt-6 flex justify-end">
+          <button
+            type="button"
+            @click="cancelLinkSource"
+            class="px-4 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md font-semibold text-xs text-gray-700 dark:text-gray-300 uppercase tracking-widest hover:bg-gray-50 dark:hover:bg-gray-600"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </Modal>
   </div>
 </template>
 
@@ -309,6 +350,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import axios from 'axios'
 import { router, useForm } from '@inertiajs/vue3'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
+import Modal from '@/Components/Modal.vue'
 import DataTable, { type Column } from '@/Components/Admin/DataTable.vue'
 import Pagination from '@/Components/Admin/Pagination.vue'
 import StatusBadge from './Shared/StatusBadge.vue'
@@ -547,9 +589,46 @@ const linkForm = useForm({
   product_id: '',
   square_object_id: '',
   square_parent_object_id: '',
+  inventory_source: 'local' as 'local' | 'square',
 })
 
-const linkCatalogItem = (catalogItem: CatalogItemRow) => {
+interface LinkPreview {
+  track_inventory: boolean
+  local_quantity?: number
+  square_quantity?: number
+}
+
+// Populated by linkCatalogItem's preview fetch below, held until the admin
+// picks a source (or cancels) in the modal.
+const linkPreviewCatalogItem = ref<CatalogItemRow | null>(null)
+const linkPreviewData = ref<LinkPreview | null>(null)
+const linkPreviewLoading = ref(false)
+const linkPreviewError = ref<string | null>(null)
+const showLinkSourceModal = ref(false)
+
+const finishLink = (catalogItem: CatalogItemRow) => {
+  // unmappedProducts and mappings refresh automatically as part of the
+  // Inertia response; catalogItems is local state, so the linked row
+  // is removed here to match.
+  catalogItems.value = catalogItems.value?.filter((item) => item.square_object_id !== catalogItem.square_object_id) ?? null
+  delete linkSelections.value[catalogItem.square_object_id]
+  linkPreviewCatalogItem.value = null
+  linkPreviewData.value = null
+}
+
+const submitLink = (catalogItem: CatalogItemRow, source: 'local' | 'square') => {
+  linkForm.inventory_source = source
+  linkForm.post(route('admin.square.link'), {
+    preserveScroll: true,
+    onSuccess: () => finishLink(catalogItem),
+  })
+}
+
+// Read-only dry run before anything is actually linked: shows local vs.
+// Square's live count so the admin can see what each choice would set
+// stock to, rather than committing blind. A product that doesn't track
+// inventory has no such choice to make -- link straight through.
+const linkCatalogItem = async (catalogItem: CatalogItemRow) => {
   const productId = linkSelections.value[catalogItem.square_object_id]
   if (!productId) return
 
@@ -557,15 +636,39 @@ const linkCatalogItem = (catalogItem: CatalogItemRow) => {
   linkForm.square_object_id = catalogItem.square_object_id
   linkForm.square_parent_object_id = catalogItem.square_parent_object_id ?? ''
 
-  linkForm.post(route('admin.square.link'), {
-    preserveScroll: true,
-    onSuccess: () => {
-      // unmappedProducts and mappings refresh automatically as part of the
-      // Inertia response; catalogItems is local state, so the linked row
-      // is removed here to match.
-      catalogItems.value = catalogItems.value?.filter((item) => item.square_object_id !== catalogItem.square_object_id) ?? null
-      delete linkSelections.value[catalogItem.square_object_id]
-    },
-  })
+  linkPreviewLoading.value = true
+  linkPreviewError.value = null
+
+  try {
+    const response = await axios.get(route('admin.square.link-preview'), {
+      params: { product_id: productId, square_object_id: catalogItem.square_object_id },
+    })
+    const preview: LinkPreview = response.data
+
+    if (!preview.track_inventory) {
+      submitLink(catalogItem, 'local')
+      return
+    }
+
+    linkPreviewData.value = preview
+    linkPreviewCatalogItem.value = catalogItem
+    showLinkSourceModal.value = true
+  } catch (error: any) {
+    linkPreviewError.value = error?.response?.data?.error ?? 'Failed to check inventory counts.'
+  } finally {
+    linkPreviewLoading.value = false
+  }
+}
+
+const chooseInventorySource = (source: 'local' | 'square') => {
+  if (!linkPreviewCatalogItem.value) return
+  showLinkSourceModal.value = false
+  submitLink(linkPreviewCatalogItem.value, source)
+}
+
+const cancelLinkSource = () => {
+  showLinkSourceModal.value = false
+  linkPreviewCatalogItem.value = null
+  linkPreviewData.value = null
 }
 </script>

@@ -23,6 +23,7 @@ Route::prefix('admin')
             Route::post('pull-inventory', [SquareSyncController::class, 'pullInventory'])->name('pull-inventory');
             Route::post('pull-catalog', [SquareSyncController::class, 'pullCatalog'])->name('pull-catalog');
             Route::get('catalog-items', [SquareSyncController::class, 'catalogItems'])->name('catalog-items');
+            Route::get('link-preview', [SquareSyncController::class, 'linkPreview'])->name('link-preview');
             Route::post('link', [SquareSyncController::class, 'link'])->name('link');
             Route::post('location', [SquareSyncController::class, 'updateLocation'])->name('location');
         });
