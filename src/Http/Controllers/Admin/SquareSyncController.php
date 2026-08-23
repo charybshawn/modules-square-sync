@@ -11,6 +11,7 @@ use Cultpantry\SquareSync\Actions\FetchSquareLocations;
 use Cultpantry\SquareSync\Actions\FetchSquareSyncData;
 use Cultpantry\SquareSync\Actions\FetchUnlinkedSquareCatalogItems;
 use Cultpantry\SquareSync\Actions\GetSquareLocationId;
+use Cultpantry\SquareSync\Jobs\PushInventoryCountJob;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -156,6 +157,19 @@ class SquareSyncController extends Controller implements HasMiddleware
      * existing idempotent link/relink behavior, same as PullSquareCatalog's
      * SKU-matched links -- there's only one way a mapping row gets created,
      * manual or automatic.
+     *
+     * Immediately pushes the product's current stock_quantity to Square as
+     * the starting baseline (same PHYSICAL_COUNT job the outbound
+     * StockUpdated listener uses). Without this, a freshly-linked item sits
+     * at whatever Square already had for that catalog object -- typically
+     * untracked/0 for a brand-new item -- until *something* changes stock
+     * locally again. In the meantime, SyncInventory::applyChange()'s
+     * SQUARE_PULL guard only rejects an *increase* from Square; a 0 read
+     * as genuinely lower than real local stock, so an inbound webhook or a
+     * `square:reconcile --fix` run in that window would apply it as a
+     * legitimate decrease and wipe the real count out. Pushing first closes
+     * that gap by making Square's count correct before anything can pull
+     * from it.
      */
     public function link(Request $request): RedirectResponse
     {
@@ -176,7 +190,14 @@ class SquareSyncController extends Controller implements HasMiddleware
             $validated['square_parent_object_id'] ?? null,
         );
 
-        return redirect()->back()->with('success', "Linked '{$product->title}' to Square.");
+        $message = "Linked '{$product->title}' to Square.";
+
+        if ($product->track_inventory) {
+            PushInventoryCountJob::dispatch($product->id, $product->stock_quantity)->afterCommit();
+            $message = "Linked '{$product->title}' to Square -- pushing current stock ({$product->stock_quantity}) as the baseline.";
+        }
+
+        return redirect()->back()->with('success', $message);
     }
 
     /**
