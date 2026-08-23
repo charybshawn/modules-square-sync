@@ -30,11 +30,7 @@
           >
             <button type="button" @click="runSyncCheck" class="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600">
               <span class="block text-sm font-medium text-gray-900 dark:text-white">Run Sync Check</span>
-              <span class="block text-xs text-gray-500 dark:text-gray-400">Report inventory drift against Square -- no changes written</span>
-            </button>
-            <button type="button" @click="pullInventoryNow" class="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600">
-              <span class="block text-sm font-medium text-gray-900 dark:text-white">Pull Inventory Now</span>
-              <span class="block text-xs text-gray-500 dark:text-gray-400">Apply Square's inventory counts to local stock for every drifted product</span>
+              <span class="block text-xs text-gray-500 dark:text-gray-400">Compare local stock against Square, then choose how to resolve any drift</span>
             </button>
           </div>
         </div>
@@ -345,9 +341,7 @@
 
     <Modal :show="showSyncResultModal" max-width="2xl" @close="closeSyncResultModal">
       <div class="p-6">
-        <h2 class="text-lg font-medium text-gray-900 dark:text-white">
-          {{ syncResultMode === 'pull-inventory' ? 'Inventory Pull Results' : 'Sync Check Results' }}
-        </h2>
+        <h2 class="text-lg font-medium text-gray-900 dark:text-white">Sync Check Results</h2>
 
         <p v-if="syncResultError" class="mt-3 text-sm text-red-600 dark:text-red-400">{{ syncResultError }}</p>
 
@@ -360,8 +354,7 @@
           </p>
           <template v-else>
             <p class="mt-3 text-sm text-gray-600 dark:text-gray-400">
-              {{ syncResult.drifted }} of {{ syncResult.checked }} linked product(s) drifted from Square.
-              <span v-if="syncResultMode === 'pull-inventory'">{{ syncResult.corrected }} corrected.</span>
+              {{ syncResult.drifted }} of {{ syncResult.checked }} linked product(s) drifted from Square. Pick which count is correct for each — the other side gets overwritten to match. Rows you leave alone are untouched.
             </p>
 
             <div class="mt-4 overflow-x-auto border border-gray-200 dark:border-gray-700 rounded-md">
@@ -372,7 +365,7 @@
                     <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Square</th>
                     <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Local</th>
                     <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Diff</th>
-                    <th v-if="syncResultMode === 'pull-inventory'" class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Result</th>
+                    <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Resolve</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-gray-200 dark:divide-gray-700 bg-white dark:bg-gray-800">
@@ -389,9 +382,31 @@
                     >
                       {{ row.difference >= 0 ? '+' : '' }}{{ row.difference }}
                     </td>
-                    <td v-if="syncResultMode === 'pull-inventory'" class="px-4 py-2 text-xs">
-                      <span v-if="row.fix_applied" class="text-green-600 dark:text-green-400">Corrected</span>
-                      <span v-else class="text-yellow-600 dark:text-yellow-400">Blocked — would increase local stock</span>
+                    <td class="px-4 py-2 text-xs">
+                      <span v-if="resolvedRows[row.product_id] === 'local'" class="text-green-600 dark:text-green-400">
+                        Resolved — Local ({{ row.local_quantity }})
+                      </span>
+                      <span v-else-if="resolvedRows[row.product_id] === 'square'" class="text-green-600 dark:text-green-400">
+                        Resolved — Square ({{ row.square_quantity }})
+                      </span>
+                      <div v-else class="flex gap-1">
+                        <button
+                          type="button"
+                          :disabled="resolvingProductIds.has(row.product_id)"
+                          @click="resolveDriftRow(row, 'local')"
+                          class="px-2 py-1 border border-gray-300 dark:border-gray-600 rounded text-xs text-gray-700 dark:text-gray-200 hover:border-indigo-500 dark:hover:border-indigo-400 disabled:opacity-50"
+                        >
+                          Use Local
+                        </button>
+                        <button
+                          type="button"
+                          :disabled="resolvingProductIds.has(row.product_id)"
+                          @click="resolveDriftRow(row, 'square')"
+                          class="px-2 py-1 border border-gray-300 dark:border-gray-600 rounded text-xs text-gray-700 dark:text-gray-200 hover:border-indigo-500 dark:hover:border-indigo-400 disabled:opacity-50"
+                        >
+                          Use Square
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 </tbody>
@@ -584,15 +599,9 @@ const unlinkMapping = (item: MappingRow) => {
 // One in-flight action at a time -- the trigger button's own label
 // reflects which is running, so there's no separate spinner state to keep
 // in sync per menu item.
-const runningAction = ref<'sync' | 'pull-inventory' | null>(null)
+const runningAction = ref<'sync' | null>(null)
 
-const actionsButtonLabel = computed(() => {
-  switch (runningAction.value) {
-    case 'sync': return 'Running…'
-    case 'pull-inventory': return 'Pulling…'
-    default: return 'Actions'
-  }
-})
+const actionsButtonLabel = computed(() => (runningAction.value === 'sync' ? 'Checking…' : 'Actions'))
 
 const showActionsMenu = ref(false)
 const actionsMenuRef = ref<HTMLElement | null>(null)
@@ -624,12 +633,13 @@ interface ReconcileResult {
   rows: DriftRow[]
 }
 
-// Both actions return real structured data (ReconcileInventoryDrift's
-// result) rather than a redirect -- shown in a modal with an actual
-// <table>, not the console command's ASCII table dumped into a flash
-// message.
+// sync() returns real structured data (ReconcileInventoryDrift's result)
+// rather than a redirect -- shown in a modal with an actual <table>, not
+// the console command's ASCII table dumped into a flash message. Each
+// drifted row can be resolved right there (see resolveDriftRow below)
+// instead of a separate "Pull Inventory Now" that unilaterally trusts
+// Square for everything at once.
 const syncResult = ref<ReconcileResult | null>(null)
-const syncResultMode = ref<'sync' | 'pull-inventory' | null>(null)
 const syncResultError = ref<string | null>(null)
 const showSyncResultModal = ref(false)
 
@@ -637,13 +647,19 @@ const closeSyncResultModal = () => {
   showSyncResultModal.value = false
   syncResult.value = null
   syncResultError.value = null
-  syncResultMode.value = null
+  resolvedRows.value = {}
+
+  if (anyRowResolved.value) {
+    anyRowResolved.value = false
+    // Stock/mapping state may have changed for whichever rows got
+    // resolved -- refresh the page's own data in the background.
+    router.reload({ only: ['mappings', 'driftEvents', 'recentActivity'] })
+  }
 }
 
 const runSyncCheck = async () => {
   showActionsMenu.value = false
   runningAction.value = 'sync'
-  syncResultMode.value = 'sync'
   syncResultError.value = null
 
   try {
@@ -651,29 +667,6 @@ const runSyncCheck = async () => {
     syncResult.value = response.data
   } catch (error: any) {
     syncResultError.value = error?.response?.data?.error ?? 'Sync check failed.'
-  } finally {
-    runningAction.value = null
-    showSyncResultModal.value = true
-  }
-}
-
-const pullInventoryNow = async () => {
-  showActionsMenu.value = false
-  if (!confirm("Apply Square's inventory counts to local stock now? This overwrites local stock for every product that's drifted from Square.")) return
-
-  runningAction.value = 'pull-inventory'
-  syncResultMode.value = 'pull-inventory'
-  syncResultError.value = null
-
-  try {
-    const response = await axios.post(route('admin.square.pull-inventory'))
-    syncResult.value = response.data
-    // Stock/mapping state may have changed -- refresh the page's own data
-    // in the background so Linked Products/Drift/Activity reflect it
-    // without a full navigation away from this modal.
-    router.reload({ only: ['mappings', 'driftEvents', 'recentActivity'] })
-  } catch (error: any) {
-    syncResultError.value = error?.response?.data?.error ?? 'Inventory pull failed.'
   } finally {
     runningAction.value = null
     showSyncResultModal.value = true
@@ -789,5 +782,32 @@ const cancelLinkSource = () => {
   showLinkSourceModal.value = false
   linkPreviewCatalogItem.value = null
   linkPreviewData.value = null
+}
+
+// Per-row resolve state for the sync-check results table below -- rather
+// than a separate "Pull Inventory Now" that unilaterally trusts Square for
+// every drifted product, the same results table lets the admin resolve
+// each row individually (or leave any of them alone). Keyed by product_id
+// so several rows can be in flight independently.
+const resolvingProductIds = ref<Set<number>>(new Set())
+const resolvedRows = ref<Record<number, 'local' | 'square'>>({})
+const anyRowResolved = ref(false)
+
+const resolveDriftRow = async (row: DriftRow, source: 'local' | 'square') => {
+  if (resolvingProductIds.value.has(row.product_id)) return
+
+  resolvingProductIds.value.add(row.product_id)
+  try {
+    await axios.post(route('admin.square.resolve-drift'), {
+      product_id: row.product_id,
+      source,
+    })
+    resolvedRows.value[row.product_id] = source
+    anyRowResolved.value = true
+  } catch (error: any) {
+    syncResultError.value = error?.response?.data?.error ?? `Failed to resolve '${row.product_title}'.`
+  } finally {
+    resolvingProductIds.value.delete(row.product_id)
+  }
 }
 </script>

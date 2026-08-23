@@ -14,6 +14,7 @@ use Cultpantry\SquareSync\Actions\FetchSquareSyncData;
 use Cultpantry\SquareSync\Actions\FetchUnlinkedSquareCatalogItems;
 use Cultpantry\SquareSync\Actions\GetSquareLocationId;
 use Cultpantry\SquareSync\Actions\ReconcileInventoryDrift;
+use Cultpantry\SquareSync\Actions\ResolveSquareInventoryDrift;
 use Cultpantry\SquareSync\Jobs\PushInventoryCountJob;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Illuminate\Http\JsonResponse;
@@ -76,7 +77,7 @@ class SquareSyncController extends Controller implements HasMiddleware
      * text (which used to get dumped wholesale into the flash message as a
      * raw ASCII table -- unreadable outside a terminal). Report-only by
      * default -- no fix -- matching the command's own safe default. See
-     * pullInventory() below for the --fix counterpart.
+     * resolveDrift() below for how a drifted row actually gets corrected.
      */
     public function sync(ReconcileInventoryDrift $reconcileInventoryDrift): JsonResponse
     {
@@ -97,22 +98,47 @@ class SquareSyncController extends Controller implements HasMiddleware
     }
 
     /**
-     * Applies every drifted product's Square inventory count to local
-     * stock_quantity -- same ReconcileInventoryDrift call as sync() above,
-     * just with fix: true. This is the manual escape hatch for whatever the
-     * inventory.count.updated webhook missed (a dropped delivery, a count
-     * made before this module was installed) without waiting on the
-     * webhook or reaching for CLI access.
+     * Resolves one drifted, already-linked product by the admin's explicit
+     * per-row choice in the sync-check results table -- 'local' pushes the
+     * current stock to Square, 'square' pulls Square's count and applies it
+     * locally (see ResolveSquareInventoryDrift for why that bypasses the
+     * increase-guard deliberately). Replaces the old blind "Pull Inventory
+     * Now" (--fix for every drifted product, unconditionally trusting
+     * Square) with the same per-item choice link() already asks at link
+     * time -- there's no longer a path that overwrites local stock without
+     * the admin picking which side is correct.
      */
-    public function pullInventory(ReconcileInventoryDrift $reconcileInventoryDrift): JsonResponse
+    public function resolveDrift(Request $request, ResolveSquareInventoryDrift $resolveSquareInventoryDrift): JsonResponse
     {
         $this->authorize('sync', new SquareObjectMapping);
 
+        $validated = $request->validate([
+            'product_id' => ['required', 'integer', Rule::exists('products', 'id')],
+            'source' => ['required', Rule::in(['local', 'square'])],
+        ]);
+
+        $product = Product::findOrFail($validated['product_id']);
+
+        $mapping = SquareObjectMapping::query()
+            ->where('mappable_type', Product::class)
+            ->where('mappable_id', $product->id)
+            ->first();
+
+        if (! $mapping) {
+            return response()->json(['error' => "'{$product->title}' is not currently linked to Square."], 422);
+        }
+
         try {
-            return response()->json($reconcileInventoryDrift->handle(fix: true));
+            $quantity = $resolveSquareInventoryDrift->handle($product, $mapping, $validated['source'], $request->user());
         } catch (Throwable $e) {
             return response()->json(['error' => "Square request failed: {$e->getMessage()}"], 502);
         }
+
+        return response()->json([
+            'product_id' => $product->id,
+            'source' => $validated['source'],
+            'quantity' => $quantity,
+        ]);
     }
 
     /**
