@@ -342,6 +342,75 @@
         </div>
       </div>
     </Modal>
+
+    <Modal :show="showSyncResultModal" max-width="2xl" @close="closeSyncResultModal">
+      <div class="p-6">
+        <h2 class="text-lg font-medium text-gray-900 dark:text-white">
+          {{ syncResultMode === 'pull-inventory' ? 'Inventory Pull Results' : 'Sync Check Results' }}
+        </h2>
+
+        <p v-if="syncResultError" class="mt-3 text-sm text-red-600 dark:text-red-400">{{ syncResultError }}</p>
+
+        <template v-else-if="syncResult">
+          <p v-if="syncResult.checked === 0" class="mt-3 text-sm text-gray-600 dark:text-gray-400">
+            No linked Square product mappings to reconcile.
+          </p>
+          <p v-else-if="syncResult.drifted === 0" class="mt-3 text-sm text-gray-600 dark:text-gray-400">
+            No drift detected — local stock matches Square for every linked product ({{ syncResult.checked }} checked).
+          </p>
+          <template v-else>
+            <p class="mt-3 text-sm text-gray-600 dark:text-gray-400">
+              {{ syncResult.drifted }} of {{ syncResult.checked }} linked product(s) drifted from Square.
+              <span v-if="syncResultMode === 'pull-inventory'">{{ syncResult.corrected }} corrected.</span>
+            </p>
+
+            <div class="mt-4 overflow-x-auto border border-gray-200 dark:border-gray-700 rounded-md">
+              <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-50 dark:bg-gray-900">
+                  <tr>
+                    <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Product</th>
+                    <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Square</th>
+                    <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Local</th>
+                    <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Diff</th>
+                    <th v-if="syncResultMode === 'pull-inventory'" class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Result</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 dark:divide-gray-700 bg-white dark:bg-gray-800">
+                  <tr v-for="row in syncResult.rows" :key="row.product_id">
+                    <td class="px-4 py-2 text-sm text-gray-900 dark:text-white">
+                      {{ row.product_title }}
+                      <span v-if="row.sku" class="block text-xs text-gray-500 dark:text-gray-400">{{ row.sku }}</span>
+                    </td>
+                    <td class="px-4 py-2 text-sm text-right text-gray-900 dark:text-white">{{ row.square_quantity }}</td>
+                    <td class="px-4 py-2 text-sm text-right text-gray-900 dark:text-white">{{ row.local_quantity }}</td>
+                    <td
+                      class="px-4 py-2 text-sm text-right"
+                      :class="row.difference >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'"
+                    >
+                      {{ row.difference >= 0 ? '+' : '' }}{{ row.difference }}
+                    </td>
+                    <td v-if="syncResultMode === 'pull-inventory'" class="px-4 py-2 text-xs">
+                      <span v-if="row.fix_applied" class="text-green-600 dark:text-green-400">Corrected</span>
+                      <span v-else class="text-yellow-600 dark:text-yellow-400">Blocked — would increase local stock</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </template>
+
+        <div class="mt-6 flex justify-end">
+          <button
+            type="button"
+            @click="closeSyncResultModal"
+            class="px-4 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md font-semibold text-xs text-gray-700 dark:text-gray-300 uppercase tracking-widest hover:bg-gray-50 dark:hover:bg-gray-600"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </Modal>
   </div>
 </template>
 
@@ -537,28 +606,78 @@ const onClickOutsideActionsMenu = (event: MouseEvent) => {
 onMounted(() => document.addEventListener('click', onClickOutsideActionsMenu))
 onBeforeUnmount(() => document.removeEventListener('click', onClickOutsideActionsMenu))
 
-const syncForm = useForm({})
-
-const runSyncCheck = () => {
-  showActionsMenu.value = false
-  runningAction.value = 'sync'
-  syncForm.post(route('admin.square.sync'), {
-    preserveScroll: true,
-    onFinish: () => { runningAction.value = null },
-  })
+interface DriftRow {
+  product_id: number
+  product_title: string
+  sku: string | null
+  square_quantity: number
+  local_quantity: number
+  difference: number
+  fix_attempted: boolean
+  fix_applied: boolean
 }
 
-const pullInventoryForm = useForm({})
+interface ReconcileResult {
+  checked: number
+  drifted: number
+  corrected: number
+  rows: DriftRow[]
+}
 
-const pullInventoryNow = () => {
+// Both actions return real structured data (ReconcileInventoryDrift's
+// result) rather than a redirect -- shown in a modal with an actual
+// <table>, not the console command's ASCII table dumped into a flash
+// message.
+const syncResult = ref<ReconcileResult | null>(null)
+const syncResultMode = ref<'sync' | 'pull-inventory' | null>(null)
+const syncResultError = ref<string | null>(null)
+const showSyncResultModal = ref(false)
+
+const closeSyncResultModal = () => {
+  showSyncResultModal.value = false
+  syncResult.value = null
+  syncResultError.value = null
+  syncResultMode.value = null
+}
+
+const runSyncCheck = async () => {
+  showActionsMenu.value = false
+  runningAction.value = 'sync'
+  syncResultMode.value = 'sync'
+  syncResultError.value = null
+
+  try {
+    const response = await axios.post(route('admin.square.sync'))
+    syncResult.value = response.data
+  } catch (error: any) {
+    syncResultError.value = error?.response?.data?.error ?? 'Sync check failed.'
+  } finally {
+    runningAction.value = null
+    showSyncResultModal.value = true
+  }
+}
+
+const pullInventoryNow = async () => {
   showActionsMenu.value = false
   if (!confirm("Apply Square's inventory counts to local stock now? This overwrites local stock for every product that's drifted from Square.")) return
 
   runningAction.value = 'pull-inventory'
-  pullInventoryForm.post(route('admin.square.pull-inventory'), {
-    preserveScroll: true,
-    onFinish: () => { runningAction.value = null },
-  })
+  syncResultMode.value = 'pull-inventory'
+  syncResultError.value = null
+
+  try {
+    const response = await axios.post(route('admin.square.pull-inventory'))
+    syncResult.value = response.data
+    // Stock/mapping state may have changed -- refresh the page's own data
+    // in the background so Linked Products/Drift/Activity reflect it
+    // without a full navigation away from this modal.
+    router.reload({ only: ['mappings', 'driftEvents', 'recentActivity'] })
+  } catch (error: any) {
+    syncResultError.value = error?.response?.data?.error ?? 'Inventory pull failed.'
+  } finally {
+    runningAction.value = null
+    showSyncResultModal.value = true
+  }
 }
 
 // Downloaded catalog items live in local state, not an Inertia prop --

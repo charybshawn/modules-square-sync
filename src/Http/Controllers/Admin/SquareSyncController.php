@@ -13,6 +13,7 @@ use Cultpantry\SquareSync\Actions\FetchSquareLocations;
 use Cultpantry\SquareSync\Actions\FetchSquareSyncData;
 use Cultpantry\SquareSync\Actions\FetchUnlinkedSquareCatalogItems;
 use Cultpantry\SquareSync\Actions\GetSquareLocationId;
+use Cultpantry\SquareSync\Actions\ReconcileInventoryDrift;
 use Cultpantry\SquareSync\Jobs\PushInventoryCountJob;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Illuminate\Http\JsonResponse;
@@ -68,12 +69,16 @@ class SquareSyncController extends Controller implements HasMiddleware
 
     /**
      * Triggers the same whole-catalog reconcile the `square:reconcile`
-     * schedule runs, via Artisan::call() rather than reimplementing any of
-     * its drift-detection logic here (see ReconcileSquareInventory).
-     * Report-only by default -- no --fix -- matching the command's own
-     * safe default. See pullInventory() below for the --fix counterpart.
+     * schedule runs -- calls ReconcileInventoryDrift directly (the same
+     * Action the console command itself uses) rather than shelling out via
+     * Artisan::call(), so the response carries real structured rows for the
+     * admin UI's results modal instead of the command's captured console
+     * text (which used to get dumped wholesale into the flash message as a
+     * raw ASCII table -- unreadable outside a terminal). Report-only by
+     * default -- no fix -- matching the command's own safe default. See
+     * pullInventory() below for the --fix counterpart.
      */
-    public function sync(): RedirectResponse
+    public function sync(ReconcileInventoryDrift $reconcileInventoryDrift): JsonResponse
     {
         // A fresh, unpersisted instance: the 'sync' ability doesn't
         // inspect the model at all (SquareObjectMappingPolicy::sync()
@@ -84,23 +89,30 @@ class SquareSyncController extends Controller implements HasMiddleware
         // in depth.
         $this->authorize('sync', new SquareObjectMapping);
 
-        return $this->runArtisanCommand('square:reconcile', [], 'Square reconcile check completed.');
+        try {
+            return response()->json($reconcileInventoryDrift->handle(fix: false));
+        } catch (Throwable $e) {
+            return response()->json(['error' => "Square request failed: {$e->getMessage()}"], 502);
+        }
     }
 
     /**
      * Applies every drifted product's Square inventory count to local
-     * stock_quantity, via `php artisan square:reconcile --fix` -- same
-     * Artisan::call() wrapper as sync(), just with the command's
-     * correction flag on. This is the manual escape hatch for whatever the
+     * stock_quantity -- same ReconcileInventoryDrift call as sync() above,
+     * just with fix: true. This is the manual escape hatch for whatever the
      * inventory.count.updated webhook missed (a dropped delivery, a count
      * made before this module was installed) without waiting on the
      * webhook or reaching for CLI access.
      */
-    public function pullInventory(): RedirectResponse
+    public function pullInventory(ReconcileInventoryDrift $reconcileInventoryDrift): JsonResponse
     {
         $this->authorize('sync', new SquareObjectMapping);
 
-        return $this->runArtisanCommand('square:reconcile', ['--fix' => true], 'Square inventory pull completed -- no drift found.');
+        try {
+            return response()->json($reconcileInventoryDrift->handle(fix: true));
+        } catch (Throwable $e) {
+            return response()->json(['error' => "Square request failed: {$e->getMessage()}"], 502);
+        }
     }
 
     /**

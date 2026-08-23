@@ -2,12 +2,7 @@
 
 namespace Cultpantry\SquareSync\Console\Commands;
 
-use App\Actions\RecordEvent;
-use App\Actions\SyncInventory;
-use App\Models\Product;
-use Cultpantry\SquareSync\Actions\GetSquareLocationId;
-use Cultpantry\SquareSync\Models\SquareObjectMapping;
-use Cultpantry\SquareSync\Square\SquareClient;
+use Cultpantry\SquareSync\Actions\ReconcileInventoryDrift;
 use Illuminate\Console\Command;
 
 /**
@@ -24,6 +19,11 @@ use Illuminate\Console\Command;
  * app's existing precedent of "detect and escalate" commands that don't
  * auto-correct. An auto-correcting reconciler is exactly the kind of thing
  * that turns one bad API response into a whole-catalog inventory wipe.
+ *
+ * A thin CLI wrapper around ReconcileInventoryDrift -- the admin page's
+ * "Run Sync Check" / "Pull Inventory Now" actions call that Action
+ * directly, so both surfaces share one implementation instead of the web
+ * path parsing this command's own table/text output.
  */
 class ReconcileSquareInventory extends Command
 {
@@ -33,12 +33,8 @@ class ReconcileSquareInventory extends Command
 
     protected $description = 'Compare local stock quantities against Square inventory counts and report (or, with --fix, correct) drift.';
 
-    public function __construct(
-        private readonly SquareClient $client,
-        private readonly SyncInventory $syncInventory,
-        private readonly RecordEvent $recordEvent,
-        private readonly GetSquareLocationId $getLocationId,
-    ) {
+    public function __construct(private readonly ReconcileInventoryDrift $reconcileInventoryDrift)
+    {
         parent::__construct();
     }
 
@@ -49,119 +45,36 @@ class ReconcileSquareInventory extends Command
         // reason for --dry-run to be silently overridden by --fix.
         $fix = $this->option('fix') && ! $this->option('dry-run');
 
-        $mappings = SquareObjectMapping::linked()->with('mappable')->get()
-            ->filter(fn (SquareObjectMapping $mapping) => $mapping->mappable instanceof Product);
+        $result = $this->reconcileInventoryDrift->handle($fix);
 
-        if ($mappings->isEmpty()) {
+        if ($result['checked'] === 0) {
             $this->info('No linked Square product mappings to reconcile.');
 
             return self::SUCCESS;
         }
 
-        $locationId = $this->getLocationId->handle();
-        $catalogObjectIds = $mappings->pluck('square_object_id')->all();
-
-        $squareQuantities = $this->fetchSquareQuantities($catalogObjectIds, $locationId);
-
-        $rows = [];
-        $drifted = 0;
-        $corrected = 0;
-
-        foreach ($mappings as $mapping) {
-            /** @var Product $product */
-            $product = $mapping->mappable;
-
-            // Square omits a count row entirely for an object it has never
-            // counted, rather than returning an explicit zero -- both mean
-            // "as far as Square knows, there are none", so a missing entry
-            // is treated the same as a 0 count.
-            $squareQuantity = $squareQuantities[$mapping->square_object_id] ?? 0;
-            $localQuantity = $product->stock_quantity;
-
-            if ($squareQuantity === $localQuantity) {
-                // Already in sync -- nothing to correct, but --fix did just
-                // successfully check this mapping against Square, and
-                // last_pulled_at should say so. Skipping this would leave a
-                // mapping that's never once drifted looking like it's never
-                // been checked at all (admin UI: "Last Pulled: Never"),
-                // which is exactly backwards from what a "Pull Inventory
-                // Now" click just did.
-                if ($fix) {
-                    $mapping->markPulled();
-                }
-
-                continue;
-            }
-
-            $drifted++;
-            $rows[] = [$product->sku, $product->title, $squareQuantity, $localQuantity, $squareQuantity - $localQuantity];
-
-            $this->recordEvent->handle(
-                type: 'square.drift_detected',
-                description: "{$product->title} stock drifted from Square (local {$localQuantity}, Square {$squareQuantity})",
-                subject: $product,
-                metadata: [
-                    'square_object_id' => $mapping->square_object_id,
-                    'square_quantity' => $squareQuantity,
-                    'local_quantity' => $localQuantity,
-                    'difference' => $squareQuantity - $localQuantity,
-                    'fixed' => $fix,
-                ],
-                severity: 'warning',
-                direction: 'inbound',
-            );
-
-            if ($fix) {
-                // applyChange() rejects a SQUARE_PULL increase outright
-                // (Square may only ever decrease local stock) -- compare
-                // the returned quantity to what was requested so a
-                // rejected increase isn't counted as "corrected" here.
-                $appliedQuantity = $this->syncInventory->applyChange(
-                    product: $product,
-                    newQuantity: $squareQuantity,
-                    reason: SyncInventory::REASONS['SQUARE_PULL'],
-                    metadata: ['source' => 'square:reconcile'],
-                );
-
-                $mapping->markPulled();
-
-                if ($appliedQuantity === $squareQuantity) {
-                    $corrected++;
-                }
-            }
-        }
-
-        if ($rows === []) {
+        if ($result['drifted'] === 0) {
             $this->info('No drift detected -- local stock matches Square for every linked product.');
 
             return self::SUCCESS;
         }
 
-        $this->table(['SKU', 'Product', 'Square Qty', 'Local Qty', 'Diff'], $rows);
-        $this->warn("{$drifted} product(s) drifted from Square.");
+        $this->table(
+            ['SKU', 'Product', 'Square Qty', 'Local Qty', 'Diff'],
+            array_map(fn (array $row) => [
+                $row['sku'],
+                $row['product_title'],
+                $row['square_quantity'],
+                $row['local_quantity'],
+                $row['difference'],
+            ], $result['rows']),
+        );
+
+        $this->warn("{$result['drifted']} product(s) drifted from Square.");
         $this->line($fix
-            ? "{$corrected} product(s) corrected to match Square."
+            ? "{$result['corrected']} product(s) corrected to match Square."
             : 'Report only -- pass --fix to correct local stock to match Square.');
 
         return self::SUCCESS;
-    }
-
-    /**
-     * @param  array<int, string>  $catalogObjectIds
-     * @return array<string, int> square_object_id => IN_STOCK quantity
-     */
-    private function fetchSquareQuantities(array $catalogObjectIds, ?string $locationId): array
-    {
-        $quantities = [];
-
-        foreach ($this->client->inventory()->batchRetrieveCounts($catalogObjectIds, array_filter([$locationId])) as $count) {
-            if (($count['state'] ?? 'IN_STOCK') !== 'IN_STOCK') {
-                continue;
-            }
-
-            $quantities[$count['catalog_object_id']] = (int) ($count['quantity'] ?? 0);
-        }
-
-        return $quantities;
     }
 }
