@@ -102,8 +102,14 @@ class ApplyInventoryCountFromSquare
         // reason: SQUARE_PULL is load-bearing -- it's what the outbound
         // StockUpdated listener checks to avoid pushing this write straight
         // back to Square, which would otherwise ping-pong the two systems
-        // forever on every inventory change.
-        $this->syncInventory->applyChange(
+        // forever on every inventory change. applyChange() itself silently
+        // rejects (returns the unchanged quantity for) any SQUARE_PULL
+        // increase -- Square may only ever decrease local stock. Compare
+        // the returned quantity against what we asked for so this method's
+        // own event doesn't claim a pull succeeded when it was rejected;
+        // applyChange() already recorded a square.inventory_increase_blocked
+        // event for that case.
+        $appliedQuantity = $this->syncInventory->applyChange(
             product: $product,
             newQuantity: $quantity,
             reason: SyncInventory::REASONS['SQUARE_PULL'],
@@ -114,6 +120,10 @@ class ApplyInventoryCountFromSquare
         );
 
         $mapping->markPulled();
+
+        if ($appliedQuantity !== $quantity) {
+            return;
+        }
 
         $this->recordEvent->handle(
             type: 'square.inventory_pulled',

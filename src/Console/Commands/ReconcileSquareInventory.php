@@ -112,7 +112,11 @@ class ReconcileSquareInventory extends Command
             );
 
             if ($fix) {
-                $this->syncInventory->applyChange(
+                // applyChange() rejects a SQUARE_PULL increase outright
+                // (Square may only ever decrease local stock) -- compare
+                // the returned quantity to what was requested so a
+                // rejected increase isn't counted as "corrected" here.
+                $appliedQuantity = $this->syncInventory->applyChange(
                     product: $product,
                     newQuantity: $squareQuantity,
                     reason: SyncInventory::REASONS['SQUARE_PULL'],
@@ -120,7 +124,10 @@ class ReconcileSquareInventory extends Command
                 );
 
                 $mapping->markPulled();
-                $corrected++;
+
+                if ($appliedQuantity === $squareQuantity) {
+                    $corrected++;
+                }
             }
         }
 
