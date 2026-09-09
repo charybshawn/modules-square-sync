@@ -5,6 +5,7 @@ namespace Cultpantry\SquareSync\Square;
 use App\Actions\RecordEvent;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Throwable;
@@ -55,7 +56,12 @@ final class SquareClient
      */
     public function request(string $method, string $path, array $payload = [], ?string $correlationId = null): SquareResponse
     {
-        $correlationId ??= (string) Str::uuid();
+        // Falls through to the host app's ambient trace id (set once per
+        // request/queued job by App\Http\Middleware\ResolveTraceContext)
+        // before minting a disconnected one -- this is what lets an
+        // outbound push triggered by one admin click join that click's
+        // trace instead of starting a new, isolated one on every request.
+        $correlationId ??= Context::get('trace_id') ?? (string) Str::uuid();
 
         $requestEvent = $this->recordEvent->handle(
             type: 'square.request',
