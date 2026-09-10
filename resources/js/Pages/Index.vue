@@ -86,7 +86,7 @@
             <div class="flex flex-col sm:flex-row sm:items-center gap-2">
               <select
                 v-model="selectedLocationId"
-                class="block w-full max-w-sm rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                class="block w-full max-w-sm rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white text-base sm:text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
               >
                 <option value="" disabled>Select a location…</option>
                 <option v-for="location in connection.locations" :key="location.id" :value="location.id">
@@ -228,7 +228,7 @@
             <div class="flex items-center gap-2">
               <select
                 v-model="linkSelections[catalogItem.square_object_id]"
-                class="block w-56 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                class="block w-56 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white text-base sm:text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
               >
                 <option value="">Select a product…</option>
                 <option v-for="product in unmappedProducts.items" :key="product.id" :value="product.id">
