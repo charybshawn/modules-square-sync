@@ -219,39 +219,74 @@
           Every Square catalog item is already linked.
         </p>
 
-        <ul v-else class="divide-y divide-gray-100 dark:divide-gray-700 border-t border-gray-100 dark:border-gray-700">
-          <li
-            v-for="catalogItem in catalogItems"
-            :key="catalogItem.square_object_id"
-            class="px-4 md:px-6 py-4 flex flex-col md:flex-row md:items-center gap-3 md:gap-4"
-          >
-            <div class="min-w-0 md:flex-1">
-              <div class="text-sm font-medium text-gray-900 dark:text-white truncate">{{ catalogItem.name }}</div>
-              <div class="text-xs text-gray-500 dark:text-gray-400">{{ catalogItem.sku ?? 'No SKU' }}</div>
+<!-- Searchable, filterable, sortable in the browser: the whole
+             unlinked catalog is already loaded. No overflow-hidden on the
+             section, or DataTable's sticky toolbar stops sticking. -->
+        <DataTable
+          v-else
+          :columns="catalogColumns"
+          :items="sortedCatalogRows"
+          :sort-field="catalogSort.field"
+          :sort-direction="catalogSort.direction"
+          searchable
+          search-placeholder="Search name or SKU…"
+          empty-message="No Square items match."
+          table-id="square-sync-catalog"
+          item-key="square_object_id"
+          mobile-row-style="flat"
+          @sort="sortCatalog"
+        >
+          <template #mobile-card="{ item }">
+            <div class="space-y-2.5">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="text-sm font-medium text-gray-900 dark:text-white">{{ item.name }}</p>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">
+                    {{ item.sku ?? 'No SKU' }}<template v-if="item.price !== null"> · {{ formatPrice(item.price, item.currency) }}</template>
+                  </p>
+                </div>
+                <CatalogBadges :archived="item.archived" :suggested="item.suggested_product_id !== null" />
+              </div>
+              <CatalogLinkControl
+                v-model="linkSelections[item.square_object_id]"
+                :item-id="item.square_object_id"
+                :item-name="item.name"
+                :products="unmappedProducts.items"
+                :disabled="linkForm.processing || linkingId !== null"
+                :busy="linkingId === item.square_object_id"
+                @link="linkCatalogItem(item)"
+              />
             </div>
-            <div class="flex items-center gap-2 md:w-96">
-              <label :for="`link-${catalogItem.square_object_id}`" class="sr-only">Local product for {{ catalogItem.name }}</label>
-              <select
-                :id="`link-${catalogItem.square_object_id}`"
-                v-model="linkSelections[catalogItem.square_object_id]"
-                class="block min-w-0 flex-1 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white text-base sm:text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-              >
-                <option value="">Select a product…</option>
-                <option v-for="product in unmappedProducts.items" :key="product.id" :value="product.id">
-                  {{ product.title }}{{ product.sku ? ` (${product.sku})` : '' }}
-                </option>
-              </select>
-              <button
-                type="button"
-                :disabled="!linkSelections[catalogItem.square_object_id] || linkForm.processing || linkingId !== null"
-                class="tap-target-touch shrink-0 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
-                @click="linkCatalogItem(catalogItem)"
-              >
-                {{ linkingId === catalogItem.square_object_id ? 'Checking…' : 'Link' }}
-              </button>
+          </template>
+
+          <template #cell-name="{ item }">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-sm font-medium text-gray-900 dark:text-white">{{ item.name }}</span>
+              <CatalogBadges :archived="item.archived" :suggested="item.suggested_product_id !== null" />
             </div>
-          </li>
-        </ul>
+          </template>
+
+          <template #cell-sku="{ item }">
+            <span class="text-sm text-gray-500 dark:text-gray-400">{{ item.sku ?? '—' }}</span>
+          </template>
+
+          <template #cell-price="{ item }">
+            <span class="text-sm text-gray-900 dark:text-white">{{ item.price !== null ? formatPrice(item.price, item.currency) : 'Variable' }}</span>
+          </template>
+
+          <template #cell-link="{ item }">
+            <CatalogLinkControl
+              v-model="linkSelections[item.square_object_id]"
+              class="min-w-[18rem]"
+              :item-id="item.square_object_id"
+              :item-name="item.name"
+              :products="unmappedProducts.items"
+              :disabled="linkForm.processing || linkingId !== null"
+              :busy="linkingId === item.square_object_id"
+              @link="linkCatalogItem(item)"
+            />
+          </template>
+        </DataTable>
 
         <!-- The local side of the same job: products still waiting for a
              Square item. Collapsed by default -- it's reference, and the
@@ -434,6 +469,8 @@ import InputLabel from '@/Components/InputLabel.vue'
 import InputError from '@/Components/InputError.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import StatusBadge from './Shared/StatusBadge.vue'
+import CatalogBadges from './Shared/CatalogBadges.vue'
+import CatalogLinkControl from './Shared/CatalogLinkControl.vue'
 import SeverityBadge from './Shared/SeverityBadge.vue'
 
 defineOptions({ layout: (h: any, page: any) => h(AdminLayout, { hideBreadcrumbOnMobile: true }, () => page) })
@@ -504,6 +541,17 @@ interface CatalogItemRow {
   square_parent_object_id: string | null
   name: string
   sku: string | null
+  price: number | null
+  currency: string | null
+  archived: boolean
+}
+
+// A catalog item as the table shows it: the filterable columns (status,
+// match) are derived here, since DataTable filters on plain row fields.
+interface CatalogTableRow extends CatalogItemRow {
+  status: 'Active' | 'Archived'
+  match: 'Suggested' | 'No match'
+  suggested_product_id: number | null
 }
 
 interface SquareEventRow {
@@ -784,7 +832,7 @@ const catalogItems = ref<CatalogItemRow[] | null>(null)
 const catalogLoading = ref(false)
 const catalogError = ref<string | null>(null)
 const linkError = ref<string | null>(null)
-const linkSelections = ref<Record<string, string>>({})
+const linkSelections = ref<Record<string, number | ''>>({})
 const linkingId = ref<string | null>(null)
 const showUnmapped = ref(false)
 
@@ -794,10 +842,93 @@ const downloadCatalog = async () => {
   try {
     const response = await axios.get(route('admin.square.catalog-items'))
     catalogItems.value = response.data.items
+    preselectSuggestions()
   } catch (error: any) {
     catalogError.value = error?.response?.data?.error ?? 'Couldn\'t download the Square catalog.'
   } finally {
     catalogLoading.value = false
+  }
+}
+
+// ── Catalog table ──
+
+const normalize = (value: string | null | undefined): string => (value ?? '').trim().toLowerCase()
+
+// An exact SKU match first, then an exact name match, among the local
+// products that aren't linked yet -- only ever a suggestion the admin
+// confirms with "Link".
+const suggestedProductFor = (item: CatalogItemRow): UnmappedProduct | undefined => {
+  const products = props.unmappedProducts.items
+
+  if (item.sku) {
+    const bySku = products.find((product) => product.sku && normalize(product.sku) === normalize(item.sku))
+    if (bySku) return bySku
+  }
+
+  return products.find((product) => normalize(product.title) === normalize(item.name))
+}
+
+const catalogRows = computed<CatalogTableRow[]>(() => (catalogItems.value ?? []).map((item) => {
+  const suggestion = suggestedProductFor(item)
+
+  return {
+    ...item,
+    status: item.archived ? 'Archived' : 'Active',
+    match: suggestion ? 'Suggested' : 'No match',
+    suggested_product_id: suggestion?.id ?? null,
+  }
+}))
+
+// Fills each row's picker with its suggestion, without overriding a pick
+// the admin already made.
+const preselectSuggestions = () => {
+  for (const row of catalogRows.value) {
+    if (row.suggested_product_id !== null && !linkSelections.value[row.square_object_id]) {
+      linkSelections.value[row.square_object_id] = row.suggested_product_id
+    }
+  }
+}
+
+const catalogColumns: Column[] = [
+  { key: 'name', label: 'Square item', sortable: true },
+  { key: 'sku', label: 'SKU', sortable: true, hideable: true },
+  { key: 'price', label: 'Price', sortable: true, hideable: true, filterable: true, filterType: 'numberRange' },
+  { key: 'status', label: 'Status', filterOnly: true, filterable: true, options: ['Active', 'Archived'] },
+  { key: 'match', label: 'Suggested match', filterOnly: true, filterable: true, options: ['Suggested', 'No match'] },
+  { key: 'link', label: 'Local product' },
+]
+
+// DataTable leaves sorting to the page (it only emits which column).
+const catalogSort = ref<{ field: keyof CatalogItemRow; direction: 'asc' | 'desc' }>({ field: 'name', direction: 'asc' })
+
+const sortCatalog = (field: string) => {
+  const key = field as keyof CatalogItemRow
+  catalogSort.value = catalogSort.value.field === key
+    ? { field: key, direction: catalogSort.value.direction === 'asc' ? 'desc' : 'asc' }
+    : { field: key, direction: 'asc' }
+}
+
+const sortedCatalogRows = computed<CatalogTableRow[]>(() => {
+  const { field, direction } = catalogSort.value
+  const sign = direction === 'asc' ? 1 : -1
+
+  // Blanks (no SKU, variable price) always sort last.
+  return [...catalogRows.value].sort((a, b) => {
+    const left = a[field]
+    const right = b[field]
+    if (left === null || left === undefined) return right === null || right === undefined ? 0 : 1
+    if (right === null || right === undefined) return -1
+    return typeof left === 'number' && typeof right === 'number'
+      ? (left - right) * sign
+      : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: 'base' }) * sign
+  })
+})
+
+const formatPrice = (amount: number, currency: string | null): string => {
+  try {
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency ?? 'CAD' }).format(amount)
+  } catch {
+    return amount.toFixed(2)
   }
 }
 
@@ -846,7 +977,7 @@ const linkCatalogItem = async (catalogItem: CatalogItemRow) => {
   const productId = linkSelections.value[catalogItem.square_object_id]
   if (!productId) return
 
-  linkForm.product_id = productId
+  linkForm.product_id = String(productId)
   linkForm.square_object_id = catalogItem.square_object_id
   linkForm.square_parent_object_id = catalogItem.square_parent_object_id ?? ''
 

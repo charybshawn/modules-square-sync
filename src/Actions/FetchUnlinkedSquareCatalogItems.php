@@ -33,7 +33,7 @@ class FetchUnlinkedSquareCatalogItems
     public function __construct(private readonly SquareClient $client) {}
 
     /**
-     * @return array<int, array{square_object_id: string, square_parent_object_id: ?string, name: string, sku: ?string}>
+     * @return array<int, array{square_object_id: string, square_parent_object_id: ?string, name: string, sku: ?string, price: ?float, currency: ?string, archived: bool}>
      */
     public function handle(): array
     {
@@ -44,11 +44,16 @@ class FetchUnlinkedSquareCatalogItems
         $mappedIds = SquareObjectMapping::query()->pluck('square_object_id')->flip()->all();
 
         $itemNames = [];
+        $archivedItems = [];
         $variations = [];
 
         foreach ($this->client->catalog()->listItems(['ITEM', 'ITEM_VARIATION']) as $object) {
             if (($object['type'] ?? null) === 'ITEM') {
                 $itemNames[$object['id']] = $object['item_data']['name'] ?? null;
+
+                if (($object['item_data']['is_archived'] ?? false) === true) {
+                    $archivedItems[$object['id']] = true;
+                }
 
                 continue;
             }
@@ -58,7 +63,7 @@ class FetchUnlinkedSquareCatalogItems
             }
         }
 
-        $items = array_map(function (array $object) use ($itemNames) {
+        $items = array_map(function (array $object) use ($itemNames, $archivedItems) {
             $variation = $object['item_variation_data'] ?? [];
             $itemId = $variation['item_id'] ?? null;
             $itemName = ($itemId !== null ? $itemNames[$itemId] ?? null : null) ?? '(unnamed item)';
@@ -73,11 +78,17 @@ class FetchUnlinkedSquareCatalogItems
                 ? "{$itemName} — {$variationName}"
                 : $itemName;
 
+            // Variable-priced variations have no price_money at all.
+            $priceMoney = $variation['price_money'] ?? null;
+
             return [
                 'square_object_id' => $object['id'],
                 'square_parent_object_id' => $itemId,
                 'name' => $name,
                 'sku' => $variation['sku'] ?? null,
+                'price' => $priceMoney !== null ? ((int) ($priceMoney['amount'] ?? 0)) / 100 : null,
+                'currency' => $priceMoney['currency'] ?? null,
+                'archived' => $itemId !== null && isset($archivedItems[$itemId]),
             ];
         }, $variations);
 
