@@ -6,32 +6,28 @@ use Cultpantry\SquareSync\Actions\ReconcileInventoryDrift;
 use Illuminate\Console\Command;
 
 /**
- * Periodic drift check between local stock_quantity and Square's inventory
- * counts. This is the safety net for anything the webhook-driven pull
- * missed -- a dropped delivery, a Square outage during retries, a manual
- * count correction made directly in Square's dashboard that predates this
- * module ever being installed.
+ * Periodic drift check between local stock and Square's inventory counts
+ * -- the safety net for anything the webhook-driven enforcement missed (a
+ * dropped delivery, a Square outage during retries, a count changed on
+ * Square with no webhook to follow it).
  *
- * Default behaviour (no flags, or --dry-run) only reports: it writes a
- * square.drift_detected event per drifted product and prints a table, but
- * never touches stock_quantity. Only --fix applies corrections. This
- * asymmetry is deliberate -- see CheckOutstandingWebhooks for the
- * app's existing precedent of "detect and escalate" commands that don't
- * auto-correct. An auto-correcting reconciler is exactly the kind of thing
- * that turns one bad API response into a whole-catalog inventory wipe.
+ * Local stock is the source of truth, so --fix pushes local counts to
+ * Square; it never changes local stock. Default behaviour (no flags, or
+ * --dry-run) only reports: it writes a square.drift_detected event per
+ * drifted item and prints a table.
  *
  * A thin CLI wrapper around ReconcileInventoryDrift -- the admin page's
- * "Run Sync Check" / "Pull Inventory Now" actions call that Action
- * directly, so both surfaces share one implementation instead of the web
- * path parsing this command's own table/text output.
+ * "Run Sync Check" action calls that Action directly, so both surfaces
+ * share one implementation instead of the web path parsing this command's
+ * own table/text output.
  */
 class ReconcileSquareInventory extends Command
 {
     protected $signature = 'square:reconcile
         {--dry-run : Report drift without correcting it (this is also the default with no flags at all)}
-        {--fix : Apply corrections for every drifted product found}';
+        {--fix : Push the local count to Square for every drifted item found}';
 
-    protected $description = 'Compare local stock quantities against Square inventory counts and report (or, with --fix, correct) drift.';
+    protected $description = 'Compare local stock against Square inventory counts and report (or, with --fix, push local counts to Square to correct) drift.';
 
     public function __construct(private readonly ReconcileInventoryDrift $reconcileInventoryDrift)
     {
@@ -72,8 +68,8 @@ class ReconcileSquareInventory extends Command
 
         $this->warn("{$result['drifted']} product(s) drifted from Square.");
         $this->line($fix
-            ? "{$result['corrected']} product(s) corrected to match Square."
-            : 'Report only -- pass --fix to correct local stock to match Square.');
+            ? "{$result['corrected']} product(s) queued to push local stock to Square."
+            : 'Report only -- pass --fix to push local stock to Square.');
 
         return self::SUCCESS;
     }

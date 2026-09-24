@@ -2,32 +2,31 @@
 
 namespace Cultpantry\SquareSync\Actions;
 
-use App\Actions\RecordEvent;
-use App\Actions\SyncInventory;
-use App\Models\Product;
+use Cultpantry\SquareSync\Contracts\AuditLog;
+use Cultpantry\SquareSync\Contracts\LocalCatalog;
+use Cultpantry\SquareSync\Contracts\LocalItem;
+use Cultpantry\SquareSync\Jobs\PushInventoryCountJob;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Cultpantry\SquareSync\Square\SquareClient;
 
 /**
  * Core drift-detection/correction logic shared by `square:reconcile` (CLI)
- * and the admin "Run Sync Check" / "Pull Inventory Now" actions -- factored
- * out so both surfaces report and correct drift identically, and the web
- * path gets real structured data back instead of parsing the console
- * command's own text/table output.
+ * and the admin "Run Sync Check" action -- factored out so both surfaces
+ * report and correct drift identically, and the web path gets real
+ * structured data back instead of parsing the console command's own
+ * text/table output.
  *
- * Default (fix: false) only reports: writes a square.drift_detected event
- * per drifted product, never touches stock_quantity. fix: true applies
- * corrections via SyncInventory::applyChange(), which -- via its
- * SQUARE_PULL increase-guard -- can silently reject a correction that
- * would raise local stock; see each row's fix_applied for whether it
- * actually did.
+ * Local stock is the source of truth, so drift is only ever corrected in
+ * one direction: fix: true pushes each drifted item's local count to
+ * Square. Local stock is never touched here. Default (fix: false) only
+ * reports, writing a square.drift_detected event per drifted item.
  */
 class ReconcileInventoryDrift
 {
     public function __construct(
         private readonly SquareClient $client,
-        private readonly SyncInventory $syncInventory,
-        private readonly RecordEvent $recordEvent,
+        private readonly AuditLog $auditLog,
+        private readonly LocalCatalog $catalog,
         private readonly GetSquareLocationId $getLocationId,
     ) {}
 
@@ -50,8 +49,11 @@ class ReconcileInventoryDrift
      */
     public function handle(bool $fix = false): array
     {
-        $mappings = SquareObjectMapping::linked()->with('mappable')->get()
-            ->filter(fn (SquareObjectMapping $mapping) => $mapping->mappable instanceof Product);
+        $mappings = SquareObjectMapping::linked()->forLocalCatalog()->get();
+        $items = $this->catalog->findMany($mappings->pluck('mappable_id')->all());
+
+        // Archived or vanished items have nothing to reconcile.
+        $mappings = $mappings->filter(fn (SquareObjectMapping $mapping) => isset($items[$mapping->mappable_id]));
 
         if ($mappings->isEmpty()) {
             return ['checked' => 0, 'drifted' => 0, 'corrected' => 0, 'rows' => []];
@@ -66,37 +68,26 @@ class ReconcileInventoryDrift
         $corrected = 0;
 
         foreach ($mappings as $mapping) {
-            /** @var Product $product */
-            $product = $mapping->mappable;
+            /** @var LocalItem $item */
+            $item = $items[$mapping->mappable_id];
 
             // Square omits a count row entirely for an object it has never
             // counted, rather than returning an explicit zero -- both mean
             // "as far as Square knows, there are none", so a missing entry
             // is treated the same as a 0 count.
             $squareQuantity = $squareQuantities[$mapping->square_object_id] ?? 0;
-            $localQuantity = $product->stock_quantity;
+            $localQuantity = $item->stockQuantity;
 
             if ($squareQuantity === $localQuantity) {
-                // Already in sync -- nothing to correct, but --fix did just
-                // successfully check this mapping against Square, and
-                // last_pulled_at should say so. Skipping this would leave a
-                // mapping that's never once drifted looking like it's never
-                // been checked at all (admin UI: "Last Pulled: Never"),
-                // which is exactly backwards from what a "Pull Inventory
-                // Now" click just did.
-                if ($fix) {
-                    $mapping->markPulled();
-                }
-
                 continue;
             }
 
             $drifted++;
 
-            $this->recordEvent->handle(
+            $this->auditLog->record(
                 type: 'square.drift_detected',
-                description: "{$product->title} stock drifted from Square (local {$localQuantity}, Square {$squareQuantity})",
-                subject: $product,
+                description: "{$item->title} stock drifted from Square (local {$localQuantity}, Square {$squareQuantity})",
+                itemId: $item->id,
                 metadata: [
                     'square_object_id' => $mapping->square_object_id,
                     'square_quantity' => $squareQuantity,
@@ -108,38 +99,20 @@ class ReconcileInventoryDrift
                 direction: 'inbound',
             );
 
-            $applied = false;
-
             if ($fix) {
-                // applyChange() rejects a SQUARE_PULL increase outright
-                // (Square may only ever decrease local stock) -- compare
-                // the returned quantity to what was requested so a
-                // rejected increase isn't reported as applied.
-                $appliedQuantity = $this->syncInventory->applyChange(
-                    product: $product,
-                    newQuantity: $squareQuantity,
-                    reason: SyncInventory::REASONS['SQUARE_PULL'],
-                    metadata: ['source' => 'square:reconcile'],
-                );
-
-                $mapping->markPulled();
-
-                $applied = $appliedQuantity === $squareQuantity;
-
-                if ($applied) {
-                    $corrected++;
-                }
+                PushInventoryCountJob::dispatch($item->id, $localQuantity)->afterCommit();
+                $corrected++;
             }
 
             $rows[] = [
-                'product_id' => $product->id,
-                'product_title' => $product->title,
-                'sku' => $product->sku,
+                'product_id' => $item->id,
+                'product_title' => $item->title,
+                'sku' => $item->sku,
                 'square_quantity' => $squareQuantity,
                 'local_quantity' => $localQuantity,
                 'difference' => $squareQuantity - $localQuantity,
                 'fix_attempted' => $fix,
-                'fix_applied' => $applied,
+                'fix_applied' => $fix,
             ];
         }
 
@@ -164,7 +137,7 @@ class ReconcileInventoryDrift
                 continue;
             }
 
-            $quantities[$count['catalog_object_id']] = (int) ($count['quantity'] ?? 0);
+            $quantities[$count['catalog_object_id']] = (int) round((float) ($count['quantity'] ?? 0));
         }
 
         return $quantities;

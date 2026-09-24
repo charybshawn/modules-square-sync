@@ -3,11 +3,8 @@
 namespace Cultpantry\SquareSync\Http\Controllers\Admin;
 
 use App\Actions\GetSiteSetting;
-use App\Actions\RecordEvent;
-use App\Actions\SyncInventory;
 use App\Actions\UpdateSiteSetting;
 use App\Http\Controllers\Controller;
-use App\Models\Product;
 use Cultpantry\SquareSync\Actions\FetchSquareInventoryCount;
 use Cultpantry\SquareSync\Actions\FetchSquareLocations;
 use Cultpantry\SquareSync\Actions\FetchSquareSyncData;
@@ -15,6 +12,10 @@ use Cultpantry\SquareSync\Actions\FetchUnlinkedSquareCatalogItems;
 use Cultpantry\SquareSync\Actions\GetSquareLocationId;
 use Cultpantry\SquareSync\Actions\ReconcileInventoryDrift;
 use Cultpantry\SquareSync\Actions\ResolveSquareInventoryDrift;
+use Cultpantry\SquareSync\Contracts\AuditLog;
+use Cultpantry\SquareSync\Contracts\LocalCatalog;
+use Cultpantry\SquareSync\Contracts\LocalInventory;
+use Cultpantry\SquareSync\Contracts\LocalItem;
 use Cultpantry\SquareSync\Jobs\PushInventoryCountJob;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Illuminate\Http\JsonResponse;
@@ -24,6 +25,7 @@ use Illuminate\Routing\Controllers\HasMiddleware;
 use Illuminate\Routing\Controllers\Middleware;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
 use Throwable;
@@ -62,7 +64,7 @@ class SquareSyncController extends Controller implements HasMiddleware
     {
         $this->authorize('delete', $mapping);
 
-        $label = $mapping->mappable?->title ?? $mapping->square_object_id;
+        $label = $mapping->localItem()?->title ?? $mapping->square_object_id;
         $mapping->unlink();
 
         return redirect()->back()->with('success', "Unlinked '{$label}' from Square.");
@@ -98,44 +100,31 @@ class SquareSyncController extends Controller implements HasMiddleware
     }
 
     /**
-     * Resolves one drifted, already-linked product by the admin's explicit
-     * per-row choice in the sync-check results table -- 'local' pushes the
-     * current stock to Square, 'square' pulls Square's count and applies it
-     * locally (see ResolveSquareInventoryDrift for why that bypasses the
-     * increase-guard deliberately). Replaces the old blind "Pull Inventory
-     * Now" (--fix for every drifted product, unconditionally trusting
-     * Square) with the same per-item choice link() already asks at link
-     * time -- there's no longer a path that overwrites local stock without
-     * the admin picking which side is correct.
+     * Resolves one drifted, already-linked item from the sync-check results
+     * table by pushing its local count to Square. Local stock is the source
+     * of truth, so there is no "trust Square" resolution -- 'source' is
+     * still accepted (and must be 'local') so the request says explicitly
+     * which way the overwrite goes.
      */
-    public function resolveDrift(Request $request, ResolveSquareInventoryDrift $resolveSquareInventoryDrift): JsonResponse
+    public function resolveDrift(Request $request, LocalCatalog $catalog, ResolveSquareInventoryDrift $resolveSquareInventoryDrift): JsonResponse
     {
         $this->authorize('sync', new SquareObjectMapping);
 
         $validated = $request->validate([
-            'product_id' => ['required', 'integer', Rule::exists('products', 'id')],
-            'source' => ['required', Rule::in(['local', 'square'])],
+            'product_id' => ['required', 'integer'],
+            'source' => ['required', Rule::in(['local'])],
         ]);
 
-        $product = Product::findOrFail($validated['product_id']);
+        $item = $this->findItemOrFail($catalog, $validated['product_id']);
 
-        $mapping = SquareObjectMapping::query()
-            ->where('mappable_type', Product::class)
-            ->where('mappable_id', $product->id)
-            ->first();
-
-        if (! $mapping) {
-            return response()->json(['error' => "'{$product->title}' is not currently linked to Square."], 422);
+        if (! SquareObjectMapping::forItem($item->id)->exists()) {
+            return response()->json(['error' => "'{$item->title}' is not currently linked to Square."], 422);
         }
 
-        try {
-            $quantity = $resolveSquareInventoryDrift->handle($product, $mapping, $validated['source'], $request->user());
-        } catch (Throwable $e) {
-            return response()->json(['error' => "Square request failed: {$e->getMessage()}"], 502);
-        }
+        $quantity = $resolveSquareInventoryDrift->handle($item);
 
         return response()->json([
-            'product_id' => $product->id,
+            'product_id' => $item->id,
             'source' => $validated['source'],
             'quantity' => $quantity,
         ]);
@@ -196,18 +185,18 @@ class SquareSyncController extends Controller implements HasMiddleware
      * Makes no changes -- no mapping created, no stock touched. This is
      * what dry-runs the choice link() below actually commits.
      */
-    public function linkPreview(Request $request, FetchSquareInventoryCount $fetchSquareInventoryCount): JsonResponse
+    public function linkPreview(Request $request, LocalCatalog $catalog, FetchSquareInventoryCount $fetchSquareInventoryCount): JsonResponse
     {
         $this->authorize('sync', new SquareObjectMapping);
 
         $validated = $request->validate([
-            'product_id' => ['required', 'integer', Rule::exists('products', 'id')],
+            'product_id' => ['required', 'integer'],
             'square_object_id' => ['required', 'string', 'max:191'],
         ]);
 
-        $product = Product::findOrFail($validated['product_id']);
+        $product = $this->findItemOrFail($catalog, $validated['product_id']);
 
-        if (! $product->track_inventory) {
+        if (! $product->tracksInventory) {
             return response()->json(['track_inventory' => false]);
         }
 
@@ -219,7 +208,7 @@ class SquareSyncController extends Controller implements HasMiddleware
 
         return response()->json([
             'track_inventory' => true,
-            'local_quantity' => $product->stock_quantity,
+            'local_quantity' => $product->stockQuantity,
             'square_quantity' => $squareQuantity,
         ]);
     }
@@ -238,29 +227,27 @@ class SquareSyncController extends Controller implements HasMiddleware
      * the current stock_quantity to Square as the baseline (see
      * linkPreview() for why a freshly-linked item can't just be left alone:
      * without a push, it sits at whatever Square already had -- typically
-     * 0 for a brand-new catalog object -- and the SQUARE_PULL increase-guard
-     * only protects against a later *increase*, not this initial gap, so an
-     * inbound webhook or reconcile could apply that stale 0 as a legitimate
-     * decrease first). 'square' does the reverse: pulls Square's current
-     * count and applies it locally via SQUARE_INITIAL_SYNC, a reason
-     * distinct from SQUARE_PULL specifically so the increase-guard doesn't
-     * block this deliberate, admin-confirmed choice.
+     * 0 for a brand-new catalog object). 'square' does the reverse: pulls
+     * Square's current count and applies it locally, once, via
+     * LocalInventory::setFromSquareAtLink() -- the only path by which
+     * Square's count is ever copied into local stock, and only because an
+     * admin explicitly chose it here.
      */
-    public function link(Request $request, FetchSquareInventoryCount $fetchSquareInventoryCount): RedirectResponse
+    public function link(Request $request, LocalCatalog $catalog, LocalInventory $inventory, FetchSquareInventoryCount $fetchSquareInventoryCount): RedirectResponse
     {
         $this->authorize('sync', new SquareObjectMapping);
 
         $validated = $request->validate([
-            'product_id' => ['required', 'integer', Rule::exists('products', 'id')],
+            'product_id' => ['required', 'integer'],
             'square_object_id' => ['required', 'string', 'max:191'],
             'square_parent_object_id' => ['nullable', 'string', 'max:191'],
             'inventory_source' => ['nullable', Rule::in(['local', 'square'])],
         ]);
 
-        $product = Product::findOrFail($validated['product_id']);
+        $product = $this->findItemOrFail($catalog, $validated['product_id']);
 
         SquareObjectMapping::linkTo(
-            $product,
+            $product->id,
             $validated['square_object_id'],
             'ITEM_VARIATION',
             $validated['square_parent_object_id'] ?? null,
@@ -268,15 +255,15 @@ class SquareSyncController extends Controller implements HasMiddleware
 
         $message = "Linked '{$product->title}' to Square.";
 
-        if (! $product->track_inventory) {
+        if (! $product->tracksInventory) {
             return redirect()->back()->with('success', $message);
         }
 
         $source = $validated['inventory_source'] ?? 'local';
 
         if ($source === 'local') {
-            PushInventoryCountJob::dispatch($product->id, $product->stock_quantity)->afterCommit();
-            $message = "Linked '{$product->title}' to Square -- pushing current stock ({$product->stock_quantity}) as the baseline.";
+            PushInventoryCountJob::dispatch($product->id, $product->stockQuantity)->afterCommit();
+            $message = "Linked '{$product->title}' to Square -- pushing current stock ({$product->stockQuantity}) as the baseline.";
 
             return redirect()->back()->with('success', $message);
         }
@@ -287,10 +274,9 @@ class SquareSyncController extends Controller implements HasMiddleware
             return redirect()->back()->with('warning', "Linked '{$product->title}' to Square, but couldn't fetch Square's current count: {$e->getMessage()}. Stock levels are out of sync until you pull inventory.");
         }
 
-        app(SyncInventory::class)->applyChange(
-            product: $product,
-            newQuantity: $squareQuantity,
-            reason: SyncInventory::REASONS['SQUARE_INITIAL_SYNC'],
+        $inventory->setFromSquareAtLink(
+            itemId: $product->id,
+            quantity: $squareQuantity,
             actor: $request->user(),
             metadata: [
                 'square_object_id' => $validated['square_object_id'],
@@ -317,7 +303,7 @@ class SquareSyncController extends Controller implements HasMiddleware
         Request $request,
         FetchSquareLocations $fetchLocations,
         UpdateSiteSetting $updateSetting,
-        RecordEvent $recordEvent,
+        AuditLog $auditLog,
         GetSquareLocationId $getLocationId,
     ): RedirectResponse {
         // Reuses the 'sync' ability rather than 'update' -- like sync()
@@ -355,7 +341,7 @@ class SquareSyncController extends Controller implements HasMiddleware
         // is the first event you'd want to find. Recording the previous
         // value makes the audit row enough on its own to explain a
         // divergence without cross-referencing settings history.
-        $recordEvent->handle(
+        $auditLog->record(
             type: 'square.location_changed',
             description: "Square sync location changed to {$validated['location_id']}",
             actor: $request->user(),
@@ -368,6 +354,23 @@ class SquareSyncController extends Controller implements HasMiddleware
         );
 
         return redirect()->back()->with('success', 'Square sync location updated.');
+    }
+
+    /**
+     * The contract-backed equivalent of the Rule::exists() +
+     * findOrFail() pair these endpoints used before the package stopped
+     * knowing the host's products table: a missing item is a validation
+     * error on product_id, not a 404, so the admin UI shows it inline.
+     */
+    private function findItemOrFail(LocalCatalog $catalog, int $itemId): LocalItem
+    {
+        $item = $catalog->find($itemId);
+
+        if (! $item) {
+            throw ValidationException::withMessages(['product_id' => 'The selected product id is invalid.']);
+        }
+
+        return $item;
     }
 
     /**

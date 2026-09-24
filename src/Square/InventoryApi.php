@@ -46,6 +46,39 @@ final class InventoryApi
     }
 
     /**
+     * POST /v2/inventory/changes/batch-retrieve, auto-paginating on cursor.
+     * Yields each change entry as Square returns it -- {type, adjustment |
+     * physical_count | transfer} -- so callers can tell a sale from a
+     * recount, which the count endpoints above can't.
+     *
+     * @param  array<int, string>  $types  e.g. ['ADJUSTMENT']
+     */
+    public function batchRetrieveChanges(array $locationIds, array $types, ?CarbonInterface $updatedAfter = null): LazyCollection
+    {
+        return LazyCollection::make(function () use ($locationIds, $types, $updatedAfter) {
+            $correlationId = (string) Str::uuid();
+            $cursor = null;
+
+            do {
+                $payload = array_filter([
+                    'location_ids' => $locationIds,
+                    'types' => $types,
+                    'updated_after' => $updatedAfter?->toIso8601String(),
+                    'cursor' => $cursor,
+                ]);
+
+                $response = $this->client->request('POST', '/v2/inventory/changes/batch-retrieve', $payload, $correlationId);
+
+                foreach ($response->json('changes') ?? [] as $change) {
+                    yield $change;
+                }
+
+                $cursor = $response->cursor();
+            } while ($cursor !== null);
+        });
+    }
+
+    /**
      * POST /v2/inventory/changes/batch-create, chunked at 100 changes per
      * request. Each chunk gets its own idempotency key derived from the
      * caller's key plus its index -- if a sync run is retried after a

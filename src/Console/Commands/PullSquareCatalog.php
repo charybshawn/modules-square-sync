@@ -2,22 +2,22 @@
 
 namespace Cultpantry\SquareSync\Console\Commands;
 
-use App\Actions\RecordEvent;
-use App\Models\Product;
+use Cultpantry\SquareSync\Contracts\AuditLog;
+use Cultpantry\SquareSync\Contracts\LocalCatalog;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Cultpantry\SquareSync\Square\SquareClient;
 use Illuminate\Console\Command;
 use Illuminate\Support\Str;
 
 /**
- * Seeds the initial Product <-> Square mapping table by walking Square's
+ * Seeds the initial local item <-> Square mapping table by walking Square's
  * whole catalog once. PullSquareCatalogDelta handles everything after this:
  * it deliberately ignores objects it has no mapping for, so without this
  * command having run first, a delta pull has nothing to act on.
  *
  * Matching is by SKU, and only by SKU. Square's ITEM_VARIATION carries the
- * sku field, and products.sku is unique and auto-generated ('PRD-XXXXXXXX')
- * on create, which makes it the one identifier both systems already agree
+ * sku field, and the host's SKUs are unique (the app auto-generates
+ * 'PRD-XXXXXXXX' on create), which makes it the one identifier both systems already agree
  * on. Matching on name instead would be guesswork -- two products can share
  * a title, titles get edited on either side, and a wrong match here silently
  * points a real product's stock at the wrong Square variation, which is
@@ -31,7 +31,7 @@ class PullSquareCatalog extends Command
 
     protected $description = 'Walk the full Square catalog and link its item variations to local products by SKU.';
 
-    public function handle(SquareClient $client, RecordEvent $recordEvent): int
+    public function handle(SquareClient $client, AuditLog $auditLog, LocalCatalog $catalog): int
     {
         if (blank(config('square-sync.access_token'))) {
             $this->error('SQUARE_ACCESS_TOKEN is not configured.');
@@ -59,7 +59,7 @@ class PullSquareCatalog extends Command
                 continue;
             }
 
-            $product = Product::withTrashed()->where('sku', $sku)->first();
+            $product = $catalog->findBySku($sku);
 
             if (! $product) {
                 $tally['unmatched']++;
@@ -78,7 +78,7 @@ class PullSquareCatalog extends Command
 
             if (! $dryRun) {
                 SquareObjectMapping::linkTo(
-                    $product,
+                    $product->id,
                     $object['id'],
                     'ITEM_VARIATION',
                     $variation['item_id'] ?? null,
@@ -108,7 +108,7 @@ class PullSquareCatalog extends Command
         // Not recorded on a dry run: the events table is an audit trail of
         // what actually changed, and a rehearsal changed nothing.
         if (! $dryRun) {
-            $recordEvent->handle(
+            $auditLog->record(
                 type: 'square.catalog_pulled',
                 description: "Square catalog import linked {$tally['linked']} product(s)",
                 metadata: $tally,

@@ -41,19 +41,88 @@ etc.). Every credential is read via `env()`; nothing is ever committed.
 php artisan migrate
 ```
 
-Creates `square_object_mappings` and `square_webhook_events`.
+Creates `square_object_mappings`, `square_webhook_events`,
+`square_inventory_changes`, and `square_imported_sales`. The last two
+migrations also seed the change-log and sales watermarks to "now": the
+sync picks up from the moment you deploy.
 
-## 5. Publish the Vue pages and build
+## 5. Bind the integration contracts
+
+The module never touches your app's models directly. It talks to your app
+only through the interfaces in `src/Contracts/`, which your app binds in a
+service provider of its own. Cult Pantry's is
+`App\Providers\SquareSyncIntegrationServiceProvider`:
+
+| Contract | What it's for |
+|---|---|
+| `LocalCatalog` | Look up your sellable items (e.g. products) by id or SKU |
+| `LocalInventory` | Apply a Square sale / restock to local stock through your own stock funnel |
+| `AuditLog` | Write and read back the `square.*` audit trail |
+| `SquareSaleRecorder` | Record each Square sale and refund in your own orders system (record-only -- must not touch stock) |
+
+Every contract has a null default, so an app that binds nothing still boots,
+but syncs and records nothing.
+
+Your app also tells the module about local changes:
+
+- On every local stock change, call `Cultpantry\SquareSync\Actions\QueueStockPush::handle($itemId, $newQuantity)`.
+  Skip changes that came from `LocalInventory::setFromSquareAtLink()`.
+- When an item's title, description, or price changes, or it's archived or restored, call
+  `QueueCatalogPush::handle($itemId, QueueCatalogPush::UPDATED | ARCHIVED | RESTORED)`.
+
+## 6. Square account setup
+
+The access token needs these permissions: `ITEMS_READ`, `ITEMS_WRITE`,
+`INVENTORY_READ`, `INVENTORY_WRITE`, `ORDERS_READ`, `CUSTOMERS_READ`.
+
+Webhook subscriptions (Square Developer Console):
+
+- `inventory.count.updated` -- required. Applies Square sales to local stock
+  and overwrites any count changed directly on Square.
+- `catalog.version.updated` -- required. Picks up items deleted on Square.
+- `order.updated` -- optional. Records sales of items that don't track
+  inventory within seconds, instead of at the next scheduled pull.
+
+Schedule `square:pull-sales` (e.g. every 15 minutes) as a catch-up for any
+missed webhook, and optionally `square:reconcile` for a drift report.
+
+## 7. Backfill past Square sales (once)
+
+```bash
+php artisan square:import-sales --since=2026-01-01
+```
+
+This records sales and refunds only; it never changes stock, because those
+sales already happened. It's safe to re-run, and re-running it is how you
+retry any order logged as `square.sale_import_failed`.
+
+## 8. Publish the Vue pages and build
 
 ```bash
 php artisan vendor:publish --tag=square-sync-pages
 npm run build   # or npm run dev while iterating
 ```
 
-## 6. Verify
+## 9. Verify
 
 Then visit `/admin/settings/modules` as an admin -- Square Sync should show
 an "Active" badge. Register the webhook notification URL
 (`SQUARE_NOTIFICATION_URL`) in the Square Developer Console, matching byte
 for byte -- Square signs its webhook payloads over that exact URL plus the
 raw body, so any mismatch fails every signature check.
+
+## How the sync behaves
+
+- **Local stock is the source of truth.** Local adjustments (stock added,
+  removed, recounted, production runs, web orders) are pushed to Square as
+  absolute counts.
+- **Only Square sales move local stock.** The inventory webhook triggers a
+  read of Square's inventory change log. Movements out of `IN_STOCK` into a
+  sale state (`SOLD`, `RESERVED_FOR_SALE`) lower local stock. Refunds and
+  returns back into `IN_STOCK` raise it. Each change is applied exactly once.
+- **Manual edits on Square are ignored and overwritten.** A recount, waste
+  entry, or any other count change made on Square is never applied locally.
+  The local count is pushed back over it, and a
+  `square.manual_change_overridden` event is logged.
+- **Drift is fixed in one direction.** `square:reconcile --fix` and the admin
+  page's per-row resolve push local counts to Square.

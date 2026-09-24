@@ -2,9 +2,8 @@
 
 namespace Cultpantry\SquareSync\Jobs;
 
-use App\Actions\RecordEvent;
-use App\Models\Product;
 use Cultpantry\SquareSync\Actions\GetSquareLocationId;
+use Cultpantry\SquareSync\Contracts\AuditLog;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Cultpantry\SquareSync\Square\InventoryApi;
 use Cultpantry\SquareSync\Square\SquareClient;
@@ -15,7 +14,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
 /**
- * Pushes a single product's stock_quantity to Square as an absolute
+ * Pushes a single local item's stock count to Square as an absolute
  * PHYSICAL_COUNT (via InventoryApi::physicalCount() -- idempotent under
  * retry, unlike an ADJUSTMENT delta which would double-apply if the same
  * retry landed twice).
@@ -44,12 +43,9 @@ class PushInventoryCountJob implements ShouldQueue
         public readonly int $quantity,
     ) {}
 
-    public function handle(SquareClient $client, RecordEvent $recordEvent, GetSquareLocationId $getLocationId): void
+    public function handle(SquareClient $client, AuditLog $auditLog, GetSquareLocationId $getLocationId): void
     {
-        $mapping = SquareObjectMapping::query()
-            ->where('mappable_type', Product::class)
-            ->where('mappable_id', $this->productId)
-            ->first();
+        $mapping = SquareObjectMapping::forItem($this->productId)->first();
 
         // The mapping may have been unlinked between dispatch and
         // execution (e.g. the product was soft-deleted and archived on
@@ -81,17 +77,17 @@ class PushInventoryCountJob implements ShouldQueue
         // the count.
         $client->inventory()->batchChangeInventory([$change], $idempotencyKey);
 
-        // Inventory's echo-loop break is the reason field, not this hash
-        // (ApplyInventoryCountFromSquare tags every inbound apply with
-        // SQUARE_PULL, which PushStockToSquare refuses to push back
-        // regardless of whether the quantity actually changed) -- the hash
-        // here is purely for audit consistency with the catalog side.
+        // Purely for audit consistency with the catalog side -- inventory
+        // has no echo loop to break with this hash: Square's resulting
+        // inventory.count.updated webhook reports a count that already
+        // equals local, so PullSquareInventoryChanges has nothing to push
+        // back.
         $mapping->markPushed(hash('sha256', json_encode($change)));
 
-        $recordEvent->handle(
+        $auditLog->record(
             type: 'square.inventory_pushed',
-            description: "{$mapping->mappable?->title} stock pushed to Square ({$this->quantity})",
-            subject: $mapping->mappable,
+            description: "{$mapping->localItem()?->title} stock pushed to Square ({$this->quantity})",
+            itemId: $this->productId,
             metadata: [
                 'square_object_id' => $mapping->square_object_id,
                 'quantity' => $this->quantity,
