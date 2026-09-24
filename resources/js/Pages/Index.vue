@@ -536,10 +536,15 @@ interface Props {
   unmappedProducts: UnmappedProducts
   driftEvents: SquareEventRow[]
   recentActivity: ActivityGroup[]
-  summary: SyncSummary
+  summary?: SyncSummary
 }
 
-const props = defineProps<Props>()
+// summary is newer than the rest of the page's props -- defaulted so the
+// page still renders if it's ever published ahead of the PHP that sends
+// it (a deploy that hasn't reloaded PHP yet), instead of crashing.
+const props = withDefaults(defineProps<Props>(), {
+  summary: () => ({ sales_recorded: 0, refunds_recorded: 0, stock_changes_applied: 0, last_sale_at: null }),
+})
 
 const { confirmDialog, askDialog } = useConfirmDialog()
 
