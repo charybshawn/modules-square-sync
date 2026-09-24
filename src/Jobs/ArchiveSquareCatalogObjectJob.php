@@ -2,8 +2,8 @@
 
 namespace Cultpantry\SquareSync\Jobs;
 
-use App\Actions\RecordEvent;
-use App\Models\Product;
+use Cultpantry\SquareSync\Contracts\AuditLog;
+use Cultpantry\SquareSync\Contracts\LocalCatalog;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Cultpantry\SquareSync\Square\SquareClient;
 use Illuminate\Bus\Queueable;
@@ -13,9 +13,9 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
 /**
- * Archives, or un-archives, a product's Square catalog item -- dispatched
- * by ProductObserver on soft-delete ($archived: true) and restore
- * ($archived: false).
+ * Archives, or un-archives, an item's Square catalog item -- dispatched
+ * by QueueCatalogPush when the host archives ($archived: true) or restores
+ * ($archived: false) the local item.
  *
  * Deliberately never calls CatalogApi::deleteObject(). Square's DELETE
  * hard-removes a catalog object with no undo, which would permanently
@@ -39,12 +39,9 @@ class ArchiveSquareCatalogObjectJob implements ShouldQueue
         public readonly bool $archived,
     ) {}
 
-    public function handle(SquareClient $client, RecordEvent $recordEvent): void
+    public function handle(SquareClient $client, AuditLog $auditLog, LocalCatalog $catalog): void
     {
-        $mapping = SquareObjectMapping::query()
-            ->where('mappable_type', Product::class)
-            ->where('mappable_id', $this->productId)
-            ->first();
+        $mapping = SquareObjectMapping::forItem($this->productId)->first();
 
         // Never synced to Square in the first place -- nothing to archive
         // or restore there.
@@ -52,13 +49,11 @@ class ArchiveSquareCatalogObjectJob implements ShouldQueue
             return;
         }
 
-        // withTrashed(), not mapping->mappable() -- on the archive path the
-        // product is already soft-deleted by the time this job runs
-        // (dispatched ->afterCommit() from ProductObserver::deleted()), and
-        // MorphTo's default query excludes trashed rows, which would
-        // otherwise resolve to null here and drop the product off the
-        // audit event below.
-        $product = Product::withTrashed()->find($this->productId);
+        // withTrashed -- on the archive path the item is already archived
+        // by the time this job runs (dispatched ->afterCommit()), and a
+        // live-only lookup would resolve to null here and drop its title
+        // off the audit event below.
+        $product = $catalog->find($this->productId, withTrashed: true);
 
         $object = array_filter([
             'type' => 'ITEM',
@@ -85,12 +80,12 @@ class ArchiveSquareCatalogObjectJob implements ShouldQueue
         // direction (it mirrors what actually happened locally: the
         // product was soft-deleted); un-archiving is recorded as an
         // ordinary catalog push, since that's what it is from Square's side.
-        $recordEvent->handle(
+        $auditLog->record(
             type: $this->archived ? 'square.product_soft_deleted' : 'square.catalog_pushed',
             description: $this->archived
                 ? "{$product?->title} soft-deleted -- archived on Square"
                 : "{$product?->title} restored -- un-archived on Square",
-            subject: $product,
+            itemId: $this->productId,
             metadata: [
                 'square_object_id' => $mapping->square_object_id,
                 'archived' => $this->archived,

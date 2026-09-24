@@ -2,8 +2,9 @@
 
 namespace Cultpantry\SquareSync\Jobs;
 
-use App\Actions\RecordEvent;
-use App\Models\Product;
+use Cultpantry\SquareSync\Contracts\AuditLog;
+use Cultpantry\SquareSync\Contracts\LocalCatalog;
+use Cultpantry\SquareSync\Contracts\LocalItem;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Cultpantry\SquareSync\Square\SquareClient;
 use Illuminate\Bus\Queueable;
@@ -15,8 +16,8 @@ use Illuminate\Queue\SerializesModels;
 /**
  * Pushes a product's title/description/price to Square as a CatalogItem
  * (with a single embedded ITEM_VARIATION carrying the price -- Square has
- * no price field on the item itself). Dispatched by ProductObserver
- * whenever one of those three fields changes.
+ * no price field on the item itself). Dispatched by QueueCatalogPush
+ * whenever one of those three fields changes on the host side.
  *
  * Constructor takes the product id, not the model, for the same
  * re-fetch-a-stale-value reason documented on PushInventoryCountJob --
@@ -39,9 +40,9 @@ class PushCatalogObjectJob implements ShouldQueue
 
     public function __construct(public readonly int $productId) {}
 
-    public function handle(SquareClient $client, RecordEvent $recordEvent): void
+    public function handle(SquareClient $client, AuditLog $auditLog, LocalCatalog $catalog): void
     {
-        $product = Product::find($this->productId);
+        $product = $catalog->find($this->productId);
 
         // Hard-deleted (or otherwise gone) between dispatch and execution
         // -- nothing left to push. Soft-deleted products are handled by
@@ -50,10 +51,7 @@ class PushCatalogObjectJob implements ShouldQueue
             return;
         }
 
-        $mapping = SquareObjectMapping::query()
-            ->where('mappable_type', Product::class)
-            ->where('mappable_id', $this->productId)
-            ->first();
+        $mapping = SquareObjectMapping::forItem($this->productId)->first();
 
         $isCreate = $mapping === null;
 
@@ -89,7 +87,7 @@ class PushCatalogObjectJob implements ShouldQueue
                 return;
             }
 
-            $mapping = SquareObjectMapping::linkTo($product, $realId, 'ITEM');
+            $mapping = SquareObjectMapping::linkTo($product->id, $realId, 'ITEM');
         }
 
         // The catalog echo-loop break: catalog.version.updated fires on our
@@ -99,10 +97,10 @@ class PushCatalogObjectJob implements ShouldQueue
         // we just made" rather than an independent Square-side edit.
         $mapping->markPushed($hash, $version);
 
-        $recordEvent->handle(
+        $auditLog->record(
             type: 'square.catalog_pushed',
             description: "{$product->title} catalog pushed to Square",
-            subject: $product,
+            itemId: $product->id,
             metadata: [
                 'square_object_id' => $mapping->square_object_id,
                 'title' => $product->title,
@@ -117,7 +115,7 @@ class PushCatalogObjectJob implements ShouldQueue
     /**
      * @return array<string, mixed>
      */
-    private function buildCatalogObject(Product $product, ?SquareObjectMapping $mapping, bool $isCreate): array
+    private function buildCatalogObject(LocalItem $product, ?SquareObjectMapping $mapping, bool $isCreate): array
     {
         $itemId = $isCreate ? '#temp_id' : $mapping->square_object_id;
         $variationId = $isCreate ? '#temp_id_variation' : "{$itemId}#regular";

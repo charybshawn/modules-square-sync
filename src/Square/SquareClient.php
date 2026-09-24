@@ -2,7 +2,7 @@
 
 namespace Cultpantry\SquareSync\Square;
 
-use App\Actions\RecordEvent;
+use Cultpantry\SquareSync\Contracts\AuditLog;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Context;
@@ -13,7 +13,7 @@ use Throwable;
 /**
  * Thin wrapper over the Http facade -- deliberately not the Square PHP SDK.
  * Going raw over REST buys us three things the SDK can't: every request and
- * response lands in the app's audit Events table for free, Http::fake()
+ * response lands in the host app's audit trail (via AuditLog) for free, Http::fake()
  * gives trivial tests without a second mocking layer, and we're immune to
  * SDK major-version churn since we only ever touch the handful of endpoints
  * this module actually needs.
@@ -27,13 +27,23 @@ final class SquareClient
      */
     private const MAX_LOGGED_BODY_BYTES = 8192;
 
+    /**
+     * Endpoints whose successful response bodies are never written to the
+     * audit trail -- see loggableBody().
+     */
+    private const PERSONAL_DATA_PATHS = ['/v2/customers', '/v2/orders'];
+
     private ?CatalogApi $catalogApi = null;
 
     private ?InventoryApi $inventoryApi = null;
 
     private ?LocationsApi $locationsApi = null;
 
-    public function __construct(private readonly RecordEvent $recordEvent) {}
+    private ?OrdersApi $ordersApi = null;
+
+    private ?CustomersApi $customersApi = null;
+
+    public function __construct(private readonly AuditLog $auditLog) {}
 
     public function catalog(): CatalogApi
     {
@@ -50,6 +60,16 @@ final class SquareClient
         return $this->locationsApi ??= new LocationsApi($this);
     }
 
+    public function orders(): OrdersApi
+    {
+        return $this->ordersApi ??= new OrdersApi($this);
+    }
+
+    public function customers(): CustomersApi
+    {
+        return $this->customersApi ??= new CustomersApi($this);
+    }
+
     /**
      * @throws SquareException when Square returns an error that either
      *                         isn't retryable, or survived every retry attempt.
@@ -63,7 +83,7 @@ final class SquareClient
         // trace instead of starting a new, isolated one on every request.
         $correlationId ??= Context::get('trace_id') ?? (string) Str::uuid();
 
-        $requestEvent = $this->recordEvent->handle(
+        $requestRef = $this->auditLog->record(
             type: 'square.request',
             description: "Square {$method} {$path}",
             metadata: $this->redact([
@@ -94,38 +114,38 @@ final class SquareClient
         $squareResponse = new SquareResponse($response);
 
         if ($squareResponse->ok()) {
-            $this->recordEvent->handle(
+            $this->auditLog->record(
                 type: 'square.response',
                 description: "Square {$method} {$path} -> {$response->status()}",
                 metadata: $this->redact([
                     'method' => $method,
                     'path' => $path,
                     'status' => $response->status(),
-                    'body' => $this->loggableBody($response),
+                    'body' => $this->loggableBody($response, $path),
                 ]),
                 severity: 'info',
                 direction: 'inbound',
                 correlationId: $correlationId,
-                parentEvent: $requestEvent,
+                parentRef: $requestRef,
             );
 
             return $squareResponse;
         }
 
-        $this->recordEvent->handle(
+        $this->auditLog->record(
             type: 'square.error',
             description: "Square {$method} {$path} failed -> {$response->status()}",
             metadata: $this->redact([
                 'method' => $method,
                 'path' => $path,
                 'status' => $response->status(),
-                'body' => $this->loggableBody($response),
+                'body' => $this->loggableBody($response, $path),
                 'errors' => $squareResponse->errors(),
             ]),
             severity: 'error',
             direction: 'inbound',
             correlationId: $correlationId,
-            parentEvent: $requestEvent,
+            parentRef: $requestRef,
         );
 
         throw new SquareException($squareResponse->errors(), $response->status());
@@ -188,9 +208,17 @@ final class SquareClient
      * log, otherwise a truncated excerpt -- never the raw multi-hundred-KB
      * catalog dump.
      */
-    private function loggableBody(Response $response): array|string
+    private function loggableBody(Response $response, string $path): array|string
     {
         $body = $response->body();
+
+        // Customer directory and order payloads carry customers' names,
+        // emails, and phone numbers -- the audit trail records that the
+        // call happened, not the personal data. (The sale itself is kept,
+        // admin-only, by the host's SquareSaleRecorder.)
+        if ($response->successful() && collect(self::PERSONAL_DATA_PATHS)->contains(fn (string $prefix) => str_starts_with($path, $prefix))) {
+            return ['omitted' => 'personal data', 'original_bytes' => strlen($body)];
+        }
 
         if (strlen($body) <= self::MAX_LOGGED_BODY_BYTES) {
             return $response->json() ?? $body;

@@ -1,6 +1,6 @@
 {
     "name": "cultpantry/square-sync",
-    "description": "Bidirectional Square catalog and inventory synchronisation admin module.",
+    "description": "Square catalog and inventory sync admin module: local stock is the source of truth, Square sales flow back in and are recorded.",
     "type": "library",
     "license": "proprietary",
     "require": {

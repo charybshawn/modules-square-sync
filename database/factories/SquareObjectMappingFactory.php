@@ -2,7 +2,7 @@
 
 namespace Cultpantry\SquareSync\Database\Factories;
 
-use App\Models\Product;
+use Cultpantry\SquareSync\Contracts\LocalCatalog;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Illuminate\Database\Eloquent\Factories\Factory;
 
@@ -14,6 +14,9 @@ use Illuminate\Database\Eloquent\Factories\Factory;
  * way the costing package maps its seeders. $model is still set explicitly
  * below because Factory's default name-guessing only rewrites the App\Models
  * prefix and can't reach a package namespace.
+ *
+ * The package can't create a host item itself, so mappable_id defaults to
+ * 0 -- callers that need a real linked item pass one via forItem().
  */
 class SquareObjectMappingFactory extends Factory
 {
@@ -22,8 +25,8 @@ class SquareObjectMappingFactory extends Factory
     public function definition(): array
     {
         return [
-            'mappable_type' => Product::class,
-            'mappable_id' => Product::factory(),
+            'mappable_type' => fn () => app(LocalCatalog::class)->morphType(),
+            'mappable_id' => 0,
             'square_object_id' => 'SQ_ITEM_'.$this->faker->unique()->regexify('[A-Z0-9]{18}'),
             'square_parent_object_id' => null,
             'square_object_type' => 'ITEM',
@@ -33,6 +36,11 @@ class SquareObjectMappingFactory extends Factory
             'last_pushed_hash' => null,
             'sync_status' => 'linked',
         ];
+    }
+
+    public function forItem(int $itemId): static
+    {
+        return $this->state(fn () => ['mappable_id' => $itemId]);
     }
 
     public function pending(): static

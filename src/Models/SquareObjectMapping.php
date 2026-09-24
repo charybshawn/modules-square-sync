@@ -2,24 +2,27 @@
 
 namespace Cultpantry\SquareSync\Models;
 
+use Cultpantry\SquareSync\Contracts\LocalCatalog;
+use Cultpantry\SquareSync\Contracts\LocalItem;
 use Cultpantry\SquareSync\Database\Factories\SquareObjectMappingFactory;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
 
 /**
  * One row per Square catalog object (a CatalogItem or an ItemVariation)
- * linked to a local record. mappable_* is polymorphic on purpose -- the
- * only mappable type today is App\Models\Product, but Square tracks
- * inventory at the ItemVariation level under a CatalogItem parent, and this
- * app has neither an external-id column on products nor a product-variants
- * table yet. Keeping the link polymorphic means real variants can be mapped
- * later without touching this table's schema.
+ * linked to a local item. mappable_* keeps its polymorphic shape, but the
+ * package never resolves it through Eloquent: mappable_type holds whatever
+ * the host's LocalCatalog::morphType() says, and the item itself is looked
+ * up through that contract (see localItem()) -- this package never
+ * references the host's product model. Square tracks inventory at the
+ * ItemVariation level under a CatalogItem parent; keeping the columns
+ * polymorphic means real variants could be mapped later without touching
+ * this table's schema.
  *
  * square_parent_object_id is set only when square_object_type is
  * ITEM_VARIATION, and points at the parent CatalogItem's id.
@@ -93,9 +96,45 @@ class SquareObjectMapping extends Model
         return SquareObjectMappingFactory::new();
     }
 
-    public function mappable(): MorphTo
+    /**
+     * Memoised LocalCatalog lookup -- set in bulk by callers that list
+     * many mappings (see FetchSquareSyncData) so a page of rows costs one
+     * findMany() rather than one query per row.
+     */
+    private ?LocalItem $resolvedLocalItem = null;
+
+    private bool $localItemResolved = false;
+
+    /**
+     * The local item this mapping points at, or null if it no longer
+     * exists. Trashed items are included -- an archived product should
+     * still show its last-known title/sku rather than vanish.
+     */
+    public function localItem(): ?LocalItem
     {
-        return $this->morphTo();
+        if (! $this->localItemResolved) {
+            $this->setLocalItem(app(LocalCatalog::class)->find($this->mappable_id, withTrashed: true));
+        }
+
+        return $this->resolvedLocalItem;
+    }
+
+    public function setLocalItem(?LocalItem $item): void
+    {
+        $this->resolvedLocalItem = $item;
+        $this->localItemResolved = true;
+    }
+
+    public function scopeForItem(Builder $query, int $itemId): Builder
+    {
+        return $query
+            ->where('mappable_type', app(LocalCatalog::class)->morphType())
+            ->where('mappable_id', $itemId);
+    }
+
+    public function scopeForLocalCatalog(Builder $query): Builder
+    {
+        return $query->where('mappable_type', app(LocalCatalog::class)->morphType());
     }
 
     public function scopeLinked(Builder $query): Builder
@@ -172,13 +211,13 @@ class SquareObjectMapping extends Model
      * same Square object after an unlink must revive the old row instead
      * of colliding with it on a fresh insert.
      */
-    public static function linkTo(Model $model, string $squareObjectId, string $type, ?string $parentId = null): self
+    public static function linkTo(int $itemId, string $squareObjectId, string $type, ?string $parentId = null): self
     {
         $mapping = static::withTrashed()->firstOrNew(['square_object_id' => $squareObjectId]);
 
         $mapping->fill([
-            'mappable_type' => $model->getMorphClass(),
-            'mappable_id' => $model->getKey(),
+            'mappable_type' => app(LocalCatalog::class)->morphType(),
+            'mappable_id' => $itemId,
             'square_parent_object_id' => $parentId,
             'square_object_type' => $type,
             'sync_status' => 'linked',

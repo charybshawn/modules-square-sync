@@ -2,17 +2,21 @@
 
 namespace Cultpantry\SquareSync\Actions;
 
-use App\Models\Event;
-use App\Models\Product;
+use Cultpantry\SquareSync\Contracts\AuditLog;
+use Cultpantry\SquareSync\Contracts\LocalCatalog;
+use Cultpantry\SquareSync\Contracts\LocalItem;
 use Cultpantry\SquareSync\Http\Resources\SquareObjectMappingResource;
+use Cultpantry\SquareSync\Models\SquareImportedSale;
+use Cultpantry\SquareSync\Models\SquareInventoryChange;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Carbon;
 
 /**
  * Assembles every read-model the admin Square Sync page (WP7) needs, in one
  * place, so the controller stays a thin Inertia::render() dispatcher (per
  * this app's Actions-only rule) and the page's panels -- connection status,
- * linked mappings, unmapped products, drift, and recent activity -- come
+ * linked mappings, unmapped items, drift, and recent activity -- come
  * from a single, independently testable entry point instead of being built
  * up across several controller methods.
  */
@@ -29,6 +33,8 @@ class FetchSquareSyncData
     public function __construct(
         private readonly GetSquareLocationId $getLocationId,
         private readonly FetchSquareLocations $fetchLocations,
+        private readonly LocalCatalog $catalog,
+        private readonly AuditLog $auditLog,
     ) {}
 
     /**
@@ -38,6 +44,7 @@ class FetchSquareSyncData
      *     unmappedProducts: array,
      *     driftEvents: array,
      *     recentActivity: array,
+     *     summary: array,
      * }
      */
     public function handle(): array
@@ -48,6 +55,27 @@ class FetchSquareSyncData
             'unmappedProducts' => $this->unmappedProducts(),
             'driftEvents' => $this->driftEvents(),
             'recentActivity' => $this->recentActivity(),
+            'summary' => $this->summary(),
+        ];
+    }
+
+    /**
+     * Last-30-days counts for the page's stat block, from this module's
+     * own ledgers -- what the sync has actually done lately, without
+     * reaching into the host's orders.
+     *
+     * @return array{sales_recorded: int, refunds_recorded: int, stock_changes_applied: int, last_sale_at: string|null}
+     */
+    private function summary(): array
+    {
+        $since = now()->subDays(30);
+        $lastSaleAt = SquareImportedSale::where('kind', 'sale')->max('occurred_at');
+
+        return [
+            'sales_recorded' => SquareImportedSale::where('kind', 'sale')->where('created_at', '>=', $since)->count(),
+            'refunds_recorded' => SquareImportedSale::where('kind', 'refund')->where('created_at', '>=', $since)->count(),
+            'stock_changes_applied' => SquareInventoryChange::where('created_at', '>=', $since)->count(),
+            'last_sale_at' => $lastSaleAt !== null ? Carbon::parse($lastSaleAt)->toIso8601String() : null,
         ];
     }
 
@@ -79,141 +107,70 @@ class FetchSquareSyncData
     }
 
     /**
-     * withTrashed() on the mappable constraint, not the base query -- a
-     * mapping itself is only ever fetched live (unlink() soft-deletes the
-     * *mapping*, not the product), but the linked product may have been
-     * separately archived (ArchiveSquareCatalogObjectJob soft-deletes it
-     * on our side when it's removed from Square). Without withTrashed()
-     * here that row would silently render a blank title/sku instead of
-     * the product's last-known name.
+     * Trashed items are included in the lookup -- a mapping itself is only
+     * ever fetched live (unlink() soft-deletes the *mapping*, not the
+     * item), but the linked item may have been separately archived
+     * (PullSquareCatalogDelta archives it on our side when it's removed
+     * from Square). Excluding those would silently render a blank
+     * title/sku instead of the item's last-known name. One findMany() for
+     * the whole page rather than a lookup per row.
      */
     private function mappings(): AnonymousResourceCollection
     {
         $paginator = SquareObjectMapping::query()
-            ->with(['mappable' => fn ($query) => $query->withTrashed()])
             ->orderByDesc('id')
             ->paginate(self::MAPPINGS_PER_PAGE)
             ->withQueryString();
+
+        $items = $this->catalog->findMany(
+            $paginator->getCollection()->pluck('mappable_id')->all(),
+            withTrashed: true,
+        );
+
+        $paginator->getCollection()->each(
+            fn (SquareObjectMapping $mapping) => $mapping->setLocalItem($items[$mapping->mappable_id] ?? null),
+        );
 
         return SquareObjectMappingResource::collection($paginator);
     }
 
     /**
-     * Local, non-deleted products with no live SquareObjectMapping row --
-     * a soft-deleted (unlinked) mapping doesn't count as mapped, matching
+     * Live local items with no live SquareObjectMapping row -- a
+     * soft-deleted (unlinked) mapping doesn't count as mapped, matching
      * linkTo()'s own withTrashed()-aware idempotency (unlinking and
-     * re-linking the same product is meant to work). Capped for payload
+     * re-linking the same item is meant to work). Capped for payload
      * size; 'total' is reported separately so the page can say "and N
      * more" honestly rather than implying the list is exhaustive.
      */
     private function unmappedProducts(): array
     {
-        $mappedProductIds = SquareObjectMapping::query()
-            ->where('mappable_type', Product::class)
-            ->pluck('mappable_id');
+        $mappedItemIds = SquareObjectMapping::forLocalCatalog()->pluck('mappable_id')->all();
 
-        $query = Product::query()
-            ->whereNotIn('id', $mappedProductIds)
-            ->orderBy('title');
-
-        $total = $query->count();
-
-        $items = $query->limit(self::UNMAPPED_PRODUCTS_LIMIT)
-            ->get(['id', 'title', 'sku'])
-            ->map(fn (Product $product) => [
-                'id' => $product->id,
-                'title' => $product->title,
-                'sku' => $product->sku,
-            ])
-            ->all();
+        $result = $this->catalog->listExcluding($mappedItemIds, self::UNMAPPED_PRODUCTS_LIMIT);
 
         return [
-            'items' => $items,
-            'total' => $total,
+            'items' => array_map(fn (LocalItem $item) => [
+                'id' => $item->id,
+                'title' => $item->title,
+                'sku' => $item->sku,
+            ], array_values($result['items'])),
+            'total' => $result['total'],
         ];
     }
 
     private function driftEvents(): array
     {
-        return Event::ofType('square.drift_detected')
-            ->orderByDesc('created_at')
-            ->limit(self::DRIFT_EVENTS_LIMIT)
-            ->get()
-            ->map(fn (Event $event) => $this->mapEvent($event))
-            ->all();
+        return $this->auditLog->recentOfType('square.drift_detected', self::DRIFT_EVENTS_LIMIT);
     }
 
     /**
      * Recent square.* activity, one sync run per group, so a whole
      * reconcile/pull/push tree reads as one entry rather than a wall of
-     * unrelated rows. Grouped on correlation_id per the WP7 spec, anchored
-     * on root events (no parent_event_id) -- most square.* flows do build
-     * a real parent/child chain (SquareClient::request()'s request/
-     * response pair, the webhook controller's parentEvent threading), but
-     * several standalone writers (ReconcileSquareInventory's drift events,
-     * the outbound push jobs) never pass a parentEvent at all, so a purely
-     * parent/child tree would show those as isolated singletons even when
-     * they *do* share a correlation_id with something else in the group.
-     * correlatedEvents() is walked in afterwards to catch that -- guarded
-     * on a non-null correlation_id, since Event::correlatedEvents()'s
-     * `where('correlation_id', $this->correlation_id)` degrades to
-     * whereNull() for the many square.* events with none, which would
-     * otherwise pull in every unrelated null-correlation event in the
-     * table.
+     * unrelated rows -- see AuditLog::recentActivity() for the grouping
+     * contract the host implements.
      */
     private function recentActivity(): array
     {
-        $roots = Event::ofCategory('square')
-            ->roots()
-            ->orderByDesc('created_at')
-            ->limit(self::RECENT_ACTIVITY_ROOTS_LIMIT)
-            ->get();
-
-        return $roots->map(function (Event $root) {
-            $events = $this->flattenTree($root->getEventTree());
-            $seenIds = array_column($events, 'id');
-
-            if ($root->correlation_id !== null) {
-                foreach ($root->correlatedEvents()->get() as $correlated) {
-                    if (! in_array($correlated->id, $seenIds, true)) {
-                        $events[] = $this->mapEvent($correlated) + ['depth' => 1];
-                        $seenIds[] = $correlated->id;
-                    }
-                }
-            }
-
-            return [
-                'correlation_id' => $root->correlation_id,
-                'started_at' => $root->created_at?->toIso8601String(),
-                'events' => $events,
-            ];
-        })->all();
-    }
-
-    /**
-     * @return array<int, array>
-     */
-    private function flattenTree(array $tree, int $depth = 0): array
-    {
-        $flattened = [$this->mapEvent($tree['event']) + ['depth' => $depth]];
-
-        foreach ($tree['children'] as $child) {
-            array_push($flattened, ...$this->flattenTree($child, $depth + 1));
-        }
-
-        return $flattened;
-    }
-
-    private function mapEvent(Event $event): array
-    {
-        return [
-            'id' => $event->id,
-            'type' => $event->type,
-            'type_label' => $event->type_label,
-            'description' => $event->description,
-            'severity' => $event->severity,
-            'direction' => $event->direction,
-            'created_at' => $event->created_at?->toIso8601String(),
-        ];
+        return $this->auditLog->recentActivity('square', self::RECENT_ACTIVITY_ROOTS_LIMIT);
     }
 }

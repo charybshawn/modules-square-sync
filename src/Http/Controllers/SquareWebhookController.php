@@ -2,13 +2,14 @@
 
 namespace Cultpantry\SquareSync\Http\Controllers;
 
-use App\Actions\RecordEvent;
 use App\Http\Controllers\Controller;
-use App\Models\Event;
-use Cultpantry\SquareSync\Actions\ApplyInventoryCountFromSquare;
+use Cultpantry\SquareSync\Actions\EnforceLocalInventoryOnSquare;
 use Cultpantry\SquareSync\Actions\Exceptions\SquareWebhookVerificationException;
 use Cultpantry\SquareSync\Actions\PullSquareCatalogDelta;
+use Cultpantry\SquareSync\Actions\PullSquareInventoryChanges;
 use Cultpantry\SquareSync\Actions\VerifySquareWebhookSignature;
+use Cultpantry\SquareSync\Contracts\AuditLog;
+use Cultpantry\SquareSync\Jobs\PullSquareSalesJob;
 use Cultpantry\SquareSync\Models\SquareWebhookEvent;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -38,9 +39,10 @@ class SquareWebhookController extends Controller
 {
     public function __construct(
         private readonly VerifySquareWebhookSignature $verifySignature,
-        private readonly ApplyInventoryCountFromSquare $applyInventoryCount,
+        private readonly PullSquareInventoryChanges $pullInventoryChanges,
+        private readonly EnforceLocalInventoryOnSquare $enforceLocalInventory,
         private readonly PullSquareCatalogDelta $pullCatalogDelta,
-        private readonly RecordEvent $recordEvent,
+        private readonly AuditLog $auditLog,
     ) {}
 
     public function handle(Request $request): JsonResponse
@@ -85,20 +87,21 @@ class SquareWebhookController extends Controller
         // produces threads back to the one webhook that caused it.
         $correlationId = $squareEventId;
 
-        $parentEvent = $this->recordEvent->webhookReceived('Square', $eventType, [
+        $parentRef = $this->auditLog->webhookReceived($eventType, [
             'square_event_id' => $squareEventId,
         ], $correlationId);
 
         try {
             return match ($eventType) {
-                'inventory.count.updated' => $this->handleInventoryCountUpdated($payload, $webhookEvent, $correlationId, $parentEvent),
-                'catalog.version.updated' => $this->handleCatalogVersionUpdated($webhookEvent, $correlationId, $parentEvent),
-                default => $this->handleUnknownEvent($eventType, $webhookEvent, $correlationId, $parentEvent),
+                'inventory.count.updated' => $this->handleInventoryCountUpdated($payload, $webhookEvent, $correlationId, $parentRef),
+                'catalog.version.updated' => $this->handleCatalogVersionUpdated($webhookEvent, $correlationId, $parentRef),
+                'order.updated', 'order.created' => $this->handleOrderChanged($eventType, $webhookEvent, $correlationId, $parentRef),
+                default => $this->handleUnknownEvent($eventType, $webhookEvent, $correlationId, $parentRef),
             };
         } catch (Throwable $e) {
             $webhookEvent->markFailed($e->getMessage());
 
-            $this->recordEvent->webhookFailed('Square', $eventType, $e->getMessage(), [], $correlationId, $parentEvent);
+            $this->auditLog->webhookFailed($eventType, $e->getMessage(), $correlationId, $parentRef);
 
             Log::error('Square webhook processing error', [
                 'event_type' => $eventType,
@@ -114,47 +117,75 @@ class SquareWebhookController extends Controller
         }
     }
 
-    private function handleInventoryCountUpdated(array $payload, SquareWebhookEvent $webhookEvent, string $correlationId, Event $parentEvent): JsonResponse
+    /**
+     * The payload's counts are never applied locally -- they can't tell a
+     * sale from a recount. The webhook is only a trigger: pull the sales
+     * Square has logged since last time, then overwrite Square wherever
+     * its count still differs from local.
+     */
+    private function handleInventoryCountUpdated(array $payload, SquareWebhookEvent $webhookEvent, string $correlationId, ?int $parentRef): JsonResponse
     {
         $counts = $payload['data']['object']['inventory_counts'] ?? [];
 
-        foreach ($counts as $count) {
-            $this->applyInventoryCount->handle($count, $correlationId, $parentEvent);
-        }
+        $tally = $this->pullInventoryChanges->handle($correlationId, $parentRef);
+        $pushed = $this->enforceLocalInventory->handle($counts, $correlationId, $parentRef);
+
+        // A stock movement usually means a sale -- record it too, off the
+        // request path (see PullSquareSalesJob).
+        PullSquareSalesJob::dispatch($correlationId);
 
         $webhookEvent->markProcessed();
 
-        $this->recordEvent->webhookProcessed('Square', 'inventory.count.updated', null, [
-            'counts_processed' => count($counts),
-        ], $correlationId, $parentEvent);
+        $this->auditLog->webhookProcessed('inventory.count.updated', [
+            'counts_reported' => count($counts),
+            'overridden' => $pushed,
+            ...$tally,
+        ], $correlationId, $parentRef);
 
         return response()->json(['status' => 'success'], Response::HTTP_OK);
     }
 
-    private function handleCatalogVersionUpdated(SquareWebhookEvent $webhookEvent, string $correlationId, Event $parentEvent): JsonResponse
+    /**
+     * Optional subscription: records sales of items that don't track
+     * inventory (which never fire inventory.count.updated) within seconds
+     * instead of at the next scheduled square:pull-sales. The payload is
+     * only a trigger -- the queued pull reads Square's orders itself.
+     */
+    private function handleOrderChanged(string $eventType, SquareWebhookEvent $webhookEvent, string $correlationId, ?int $parentRef): JsonResponse
+    {
+        PullSquareSalesJob::dispatch($correlationId);
+
+        $webhookEvent->markProcessed();
+
+        $this->auditLog->webhookProcessed($eventType, ['sales_pull' => 'queued'], $correlationId, $parentRef);
+
+        return response()->json(['status' => 'success'], Response::HTTP_OK);
+    }
+
+    private function handleCatalogVersionUpdated(SquareWebhookEvent $webhookEvent, string $correlationId, ?int $parentRef): JsonResponse
     {
         // The payload only tells us *that* something changed, not *what* --
         // so the real work is a delta pull against Square's search API,
         // keyed off a watermark this action owns.
-        $tally = $this->pullCatalogDelta->handle($correlationId, $parentEvent);
+        $tally = $this->pullCatalogDelta->handle($correlationId, $parentRef);
 
         $webhookEvent->markProcessed();
 
-        $this->recordEvent->webhookProcessed('Square', 'catalog.version.updated', null, $tally, $correlationId, $parentEvent);
+        $this->auditLog->webhookProcessed('catalog.version.updated', $tally, $correlationId, $parentRef);
 
         return response()->json(['status' => 'success', ...$tally], Response::HTTP_OK);
     }
 
-    private function handleUnknownEvent(string $eventType, SquareWebhookEvent $webhookEvent, string $correlationId, Event $parentEvent): JsonResponse
+    private function handleUnknownEvent(string $eventType, SquareWebhookEvent $webhookEvent, string $correlationId, ?int $parentRef): JsonResponse
     {
         $reason = "Unhandled Square event type: {$eventType}";
 
         $webhookEvent->markSkipped($reason);
 
-        $this->recordEvent->webhookProcessed('Square', $eventType, null, [
+        $this->auditLog->webhookProcessed($eventType, [
             'status' => 'skipped',
             'reason' => $reason,
-        ], $correlationId, $parentEvent);
+        ], $correlationId, $parentRef);
 
         // 200, not an error status -- an event type this module doesn't
         // (yet) handle is expected traffic, not a failure. A non-2xx here

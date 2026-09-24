@@ -8,9 +8,9 @@ use App\Actions\GetSiteSetting;
  * Single resolver for which Square location this module syncs inventory
  * with. Every other class in this module that needs the location id calls
  * this rather than reading config('square-sync.location_id') directly --
- * see FetchSquareSyncData, ApplyInventoryCountFromSquare,
- * PushInventoryCountJob, PushStockToSquare, ProductObserver, and
- * ReconcileSquareInventory.
+ * see FetchSquareSyncData, PullSquareInventoryChanges, PullSquareSales,
+ * EnforceLocalInventoryOnSquare, PushInventoryCountJob, ShouldSyncToSquare,
+ * and ReconcileInventoryDrift.
  *
  * Resolution order (checked in handle()):
  *   1. The site setting an admin sets from the Square Sync page -- see

@@ -3,10 +3,9 @@
 namespace Cultpantry\SquareSync\Actions;
 
 use App\Actions\GetSiteSetting;
-use App\Actions\RecordEvent;
 use App\Actions\UpdateSiteSetting;
-use App\Models\Event;
-use App\Models\Product;
+use Cultpantry\SquareSync\Contracts\AuditLog;
+use Cultpantry\SquareSync\Contracts\LocalCatalog;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Cultpantry\SquareSync\Square\SquareClient;
 use Illuminate\Support\Carbon;
@@ -47,13 +46,14 @@ class PullSquareCatalogDelta
         private readonly SquareClient $client,
         private readonly GetSiteSetting $getSetting,
         private readonly UpdateSiteSetting $updateSetting,
-        private readonly RecordEvent $recordEvent,
+        private readonly AuditLog $auditLog,
+        private readonly LocalCatalog $catalog,
     ) {}
 
     /**
      * @return array{processed: int, echo_skipped: int, soft_deleted: int, updated: int}
      */
-    public function handle(?string $correlationId = null, ?Event $parentEvent = null): array
+    public function handle(?string $correlationId = null, ?int $parentRef = null): array
     {
         $storedWatermark = $this->getSetting->handle(self::WATERMARK_KEY);
 
@@ -74,7 +74,7 @@ class PullSquareCatalogDelta
         foreach ($this->client->catalog()->searchObjects(['begin_time' => $beginTime->toIso8601String()]) as $object) {
             $tally['processed']++;
 
-            $outcome = $this->applyObject($object, $correlationId, $parentEvent);
+            $outcome = $this->applyObject($object, $correlationId, $parentRef);
 
             if (array_key_exists($outcome, $tally)) {
                 $tally[$outcome]++;
@@ -83,7 +83,7 @@ class PullSquareCatalogDelta
 
         $this->updateSetting->handle(self::WATERMARK_KEY, $pullStartedAt->toIso8601String());
 
-        $this->recordEvent->handle(
+        $this->auditLog->record(
             type: 'square.catalog_pulled',
             description: "Square catalog delta pulled ({$tally['processed']} object(s))",
             metadata: [
@@ -93,7 +93,7 @@ class PullSquareCatalogDelta
             severity: 'info',
             direction: 'inbound',
             correlationId: $correlationId,
-            parentEvent: $parentEvent,
+            parentRef: $parentRef,
         );
 
         return $tally;
@@ -104,7 +104,7 @@ class PullSquareCatalogDelta
      *                'unmapped' (an object this app has no mapping for --
      *                square:pull-catalog's job, not a delta pull's).
      */
-    private function applyObject(array $object, ?string $correlationId, ?Event $parentEvent): string
+    private function applyObject(array $object, ?string $correlationId, ?int $parentRef): string
     {
         $squareObjectId = $object['id'] ?? null;
 
@@ -129,11 +129,11 @@ class PullSquareCatalogDelta
         }
 
         if (($object['is_deleted'] ?? false) === true) {
-            return $this->softDeleteMappedProduct($mapping, $squareObjectId, $correlationId, $parentEvent);
+            return $this->softDeleteMappedProduct($mapping, $squareObjectId, $correlationId, $parentRef);
         }
 
         // A genuine, independent change. This module doesn't sync catalog
-        // field data (name, price, etc.) back from Square into Product --
+        // field data (name, price, etc.) back from Square into local items --
         // only inventory counts and deletions are pulled -- so all there is
         // to do here is keep the mapping's version current, which prevents
         // it from being mistaken for stale (and blocking) the next push.
@@ -169,17 +169,15 @@ class PullSquareCatalogDelta
         SquareObjectMapping $mapping,
         string $squareObjectId,
         ?string $correlationId,
-        ?Event $parentEvent,
+        ?int $parentRef,
     ): string {
-        $product = $mapping->mappable;
+        $product = $mapping->localItem();
 
-        if (! $product instanceof Product) {
+        if (! $product) {
             return 'updated';
         }
 
-        if (! $product->trashed()) {
-            $product->delete();
-        }
+        $this->catalog->archive($product->id);
 
         // The Square object is gone, so this mapping no longer points at
         // anything live -- unlink() (a soft delete) rather than
@@ -188,17 +186,17 @@ class PullSquareCatalogDelta
         // sync history queryable, matching the model's existing contract.
         $mapping->unlink();
 
-        $this->recordEvent->handle(
+        $this->auditLog->record(
             type: 'square.product_soft_deleted',
             description: "{$product->title} soft-deleted -- Square object archived or removed",
-            subject: $product,
+            itemId: $product->id,
             metadata: [
                 'square_object_id' => $squareObjectId,
             ],
             severity: 'warning',
             direction: 'inbound',
             correlationId: $correlationId,
-            parentEvent: $parentEvent,
+            parentRef: $parentRef,
         );
 
         return 'soft_deleted';
