@@ -202,7 +202,8 @@ class RunSquareDiagnostics
         $missingOptional = array_diff_key(self::OPTIONAL_EVENTS, array_flip($events));
 
         if ($missingRequired !== []) {
-            return [$subscription, $this->result('webhook_subscription', $label, 'fail', 'The subscription is missing '.$this->describeEvents($missingRequired).'.')];
+            // Square only test-delivers event types the subscription has.
+            return [null, $this->result('webhook_subscription', $label, 'fail', 'The subscription is missing '.$this->describeEvents($missingRequired).'.')];
         }
 
         return [$subscription, $missingOptional !== []

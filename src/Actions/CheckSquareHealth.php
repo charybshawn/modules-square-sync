@@ -9,6 +9,7 @@ use Cultpantry\SquareSync\Contracts\AuditLog;
 use Cultpantry\SquareSync\Square\SquareClient;
 use Cultpantry\SquareSync\Square\SquareException;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Throwable;
 
 /**
@@ -80,13 +81,18 @@ class CheckSquareHealth
      */
     public function handle(?string $correlationId = null): array
     {
-        $previous = $this->snapshot();
-        $health = $this->check();
+        // One check at a time -- two admins opening the page together, or
+        // the schedule overlapping a page load, would otherwise both
+        // compare against the same previous snapshot and alert twice.
+        return Cache::lock('square-sync:health-check', 60)->block(30, function () use ($correlationId) {
+            $previous = $this->snapshot();
+            $health = $this->check();
 
-        $this->updateSetting->handle(self::SNAPSHOT_KEY, json_encode($health));
-        $this->reportChange($previous, $health, $correlationId);
+            $this->updateSetting->handle(self::SNAPSHOT_KEY, json_encode($health));
+            $this->reportChange($previous, $health, $correlationId);
 
-        return $health;
+            return $health;
+        });
     }
 
     /**
