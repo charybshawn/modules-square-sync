@@ -61,4 +61,29 @@ final class OrdersApi
             } while ($cursor !== null);
         });
     }
+
+    public function create(array $order, string $idempotencyKey): SquareResponse
+    {
+        return $this->client->request('POST', '/v2/orders', [
+            'idempotency_key' => $idempotencyKey,
+            'order' => $order,
+        ]);
+    }
+
+    public function retrieve(string $orderId): SquareResponse
+    {
+        return $this->client->request('GET', '/v2/orders/'.rawurlencode($orderId));
+    }
+
+    /**
+     * Completes an order with the given payments -- none for a zero-total
+     * order, which Square won't take a payment for.
+     */
+    public function pay(string $orderId, array $paymentIds, string $idempotencyKey): SquareResponse
+    {
+        return $this->client->request('POST', '/v2/orders/'.rawurlencode($orderId).'/pay', [
+            'idempotency_key' => $idempotencyKey,
+            'payment_ids' => $paymentIds,
+        ]);
+    }
 }

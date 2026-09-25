@@ -3,14 +3,15 @@
 namespace Cultpantry\SquareSync;
 
 use App\Support\AdminNav;
+use Cultpantry\SquareSync\Console\Commands\CheckSquareHealthCommand;
 use Cultpantry\SquareSync\Console\Commands\ImportSquareSales;
-use Cultpantry\SquareSync\Console\Commands\PullSquareCatalog;
 use Cultpantry\SquareSync\Console\Commands\PullSquareSalesCommand;
 use Cultpantry\SquareSync\Console\Commands\ReconcileSquareInventory;
-use Cultpantry\SquareSync\Console\Commands\VerifySquareLinksCommand;
+use Cultpantry\SquareSync\Contracts\AdminAlerts;
 use Cultpantry\SquareSync\Contracts\AuditLog;
 use Cultpantry\SquareSync\Contracts\LocalCatalog;
 use Cultpantry\SquareSync\Contracts\LocalInventory;
+use Cultpantry\SquareSync\Contracts\Null\NullAdminAlerts;
 use Cultpantry\SquareSync\Contracts\Null\NullAuditLog;
 use Cultpantry\SquareSync\Contracts\Null\NullLocalCatalog;
 use Cultpantry\SquareSync\Contracts\Null\NullLocalInventory;
@@ -18,6 +19,7 @@ use Cultpantry\SquareSync\Contracts\Null\NullSquareSaleRecorder;
 use Cultpantry\SquareSync\Contracts\SquareSaleRecorder;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Cultpantry\SquareSync\Policies\SquareObjectMappingPolicy;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
 
@@ -38,6 +40,7 @@ class SquareSyncServiceProvider extends ServiceProvider
         $this->app->bindIf(LocalInventory::class, NullLocalInventory::class);
         $this->app->bindIf(AuditLog::class, NullAuditLog::class);
         $this->app->bindIf(SquareSaleRecorder::class, NullSquareSaleRecorder::class);
+        $this->app->bindIf(AdminAlerts::class, NullAdminAlerts::class);
     }
 
     public function boot(): void
@@ -60,19 +63,33 @@ class SquareSyncServiceProvider extends ServiceProvider
         // `php artisan square:reconcile` would fail with "command not found"
         // in a real app even though the class is loadable.
         //
-        // Deliberately NOT wrapped in runningInConsole(), the usual idiom for
-        // registering package commands: the admin UI's "Run Sync Check"
-        // button reaches square:reconcile through Artisan::call() during an
-        // HTTP request, where runningInConsole() is false. Guarding this
-        // would leave the command registered everywhere except the one place
-        // a user can actually click it.
         $this->commands([
-            PullSquareCatalog::class,
+            CheckSquareHealthCommand::class,
             ReconcileSquareInventory::class,
             PullSquareSalesCommand::class,
             ImportSquareSales::class,
-            VerifySquareLinksCommand::class,
         ]);
+
+        // The module owns its schedule, so a host only needs the usual
+        // `schedule:run` cron -- and uninstalling the module can't leave the
+        // host scheduling commands that no longer exist.
+        $this->callAfterResolving(Schedule::class, function (Schedule $schedule) {
+            if (! config('square-sync.schedule')) {
+                return;
+            }
+
+            // Connection + every link, alerting admins when either breaks.
+            $schedule->command('square:check')->everyFifteenMinutes()->withoutOverlapping();
+
+            // Catch-up for the webhooks: applies any Square sale a dropped
+            // inventory webhook missed, and records new sales and refunds.
+            // Idempotent, so overlapping the webhooks is safe.
+            $schedule->command('square:pull-sales')->everyFifteenMinutes()->withoutOverlapping();
+
+            // Report-only drift check. Fixing (--fix) is deliberately not
+            // scheduled: a human reads square.drift_detected first.
+            $schedule->command('square:reconcile')->hourly()->withoutOverlapping();
+        });
 
         AdminNav::register([
             'name' => 'Square Sync',

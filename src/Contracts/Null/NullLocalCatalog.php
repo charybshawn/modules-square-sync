@@ -27,11 +27,6 @@ class NullLocalCatalog implements LocalCatalog
         return [];
     }
 
-    public function findBySku(string $sku): ?LocalItem
-    {
-        return null;
-    }
-
     public function listExcluding(array $excludeIds, int $limit): array
     {
         return ['items' => [], 'total' => 0];

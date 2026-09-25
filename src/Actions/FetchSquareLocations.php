@@ -16,7 +16,9 @@ use Throwable;
  *
  * Cached for 5 minutes: FetchSquareSyncData calls this on every load of the
  * admin Square Sync page, and there's no reason to hit Square's API that
- * often for data that changes approximately never.
+ * often for data that changes approximately never. The cache is keyed to
+ * the environment and token, so switching accounts never shows the old
+ * account's locations.
  */
 class FetchSquareLocations
 {
@@ -39,7 +41,8 @@ class FetchSquareLocations
             return [];
         }
 
-        $cached = Cache::get(self::CACHE_KEY);
+        $cacheKey = self::CACHE_KEY.':'.config('square-sync.environment').':'.substr(sha1((string) config('square-sync.access_token')), 0, 12);
+        $cached = Cache::get($cacheKey);
 
         if (is_array($cached) && $cached !== []) {
             return $cached;
@@ -57,7 +60,7 @@ class FetchSquareLocations
         // genuinely location-less account just re-asks, which is harmless
         // since Square accounts always have at least one.
         if ($locations !== []) {
-            Cache::put(self::CACHE_KEY, $locations, self::CACHE_TTL);
+            Cache::put($cacheKey, $locations, self::CACHE_TTL);
         }
 
         return $locations;

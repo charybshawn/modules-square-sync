@@ -2,7 +2,6 @@
 
 namespace Cultpantry\SquareSync\Actions;
 
-use Cultpantry\SquareSync\Contracts\AuditLog;
 use Cultpantry\SquareSync\Contracts\LocalCatalog;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Cultpantry\SquareSync\Square\SquareClient;
@@ -27,14 +26,23 @@ use Cultpantry\SquareSync\Square\SquareClient;
  * Nothing is unlinked automatically: the admin decides (Unlink / Relink on
  * the Square Sync page). A missing link whose item reappears goes back to
  * linked on the next check.
+ *
+ * Only ever run through CheckSquareHealth, which first makes sure the
+ * token and location are sound -- otherwise every link would look missing
+ * when really the connection is -- and which reports any change.
  */
 class VerifySquareLinks
 {
+    public const STATUS_LABELS = [
+        'missing' => 'offline -- its Square item no longer exists on this account',
+        'archived' => 'its Square item is archived',
+        'not_at_location' => 'its Square item isn\'t sold at the sync location',
+    ];
+
     public function __construct(
         private readonly SquareClient $client,
         private readonly LocalCatalog $catalog,
         private readonly GetSquareLocationId $getLocationId,
-        private readonly AuditLog $auditLog,
     ) {}
 
     /**
@@ -47,7 +55,7 @@ class VerifySquareLinks
      *     issues: array<int, array{mapping_id: int, product_id: int, product_title: string|null, square_object_id: string, status: string}>,
      * }
      */
-    public function handle(?string $correlationId = null): array
+    public function handle(): array
     {
         // Orphaned links are included so they can recover.
         $mappings = SquareObjectMapping::forLocalCatalog()->get();
@@ -91,19 +99,6 @@ class VerifySquareLinks
             }
         }
 
-        $problems = $tally['missing'] + $tally['archived'] + $tally['not_at_location'];
-
-        $this->auditLog->record(
-            type: 'square.links_verified',
-            description: $problems === 0
-                ? "Square links verified -- all {$tally['checked']} OK"
-                : "Square links verified -- {$problems} of {$tally['checked']} need attention ({$tally['missing']} missing, {$tally['archived']} archived, {$tally['not_at_location']} not at the sync location)",
-            metadata: collect($tally)->except('issues')->all(),
-            severity: $problems === 0 ? 'info' : 'warning',
-            direction: 'inbound',
-            correlationId: $correlationId,
-        );
-
         return $tally;
     }
 
@@ -117,7 +112,7 @@ class VerifySquareLinks
             return 'missing';
         }
 
-        // Links are to a variation (square:pull-catalog, manual linking) or,
+        // Links are to a variation (manual linking) or,
         // for items this app created on Square, to the item itself.
         $item = ($object['type'] ?? null) === 'ITEM_VARIATION'
             ? ($related[$object['item_variation_data']['item_id'] ?? ''] ?? null)

@@ -59,6 +59,7 @@ service provider of its own. Cult Pantry's is
 | `LocalInventory` | Apply a Square sale / restock to local stock through your own stock funnel |
 | `AuditLog` | Write and read back the `square.*` audit trail |
 | `SquareSaleRecorder` | Record each Square sale and refund in your own orders system (record-only -- must not touch stock) |
+| `AdminAlerts` | Tell your admins (e.g. by email) when the sync goes offline, a link goes stale, or it all recovers |
 
 Every contract has a null default, so an app that binds nothing still boots,
 but syncs and records nothing.
@@ -73,7 +74,10 @@ Your app also tells the module about local changes:
 ## 6. Square account setup
 
 The access token needs these permissions: `ITEMS_READ`, `ITEMS_WRITE`,
-`INVENTORY_READ`, `INVENTORY_WRITE`, `ORDERS_READ`, `CUSTOMERS_READ`.
+`INVENTORY_READ`, `INVENTORY_WRITE`, `ORDERS_READ`, `CUSTOMERS_READ`. The
+sandbox test sale also needs `ORDERS_WRITE` and `PAYMENTS_WRITE`. Use the
+application's personal access token if you can: it's the only kind that can
+read webhook subscriptions, so Diagnostics can check and test them.
 
 Webhook subscriptions (Square Developer Console):
 
@@ -83,10 +87,15 @@ Webhook subscriptions (Square Developer Console):
 - `order.updated` -- optional. Records sales of items that don't track
   inventory within seconds, instead of at the next scheduled pull.
 
-Schedule `square:pull-sales` (e.g. every 15 minutes) as a catch-up for any
-missed webhook, `square:verify-links` (e.g. hourly) to catch product links
-whose Square item was deleted, archived, or taken off the sync location, and
-optionally `square:reconcile` for a drift report.
+The module schedules its own commands -- your app only needs the usual
+`schedule:run` cron:
+
+- `square:check`, every 15 minutes: checks the connection and every product
+  link, and alerts admins when something breaks or recovers.
+- `square:pull-sales`, every 15 minutes: catch-up for any missed webhook.
+- `square:reconcile`, hourly: drift report (report-only).
+
+Set `SQUARE_SCHEDULE=false` if your app schedules them itself.
 
 ## 7. Backfill past Square sales (once)
 
@@ -113,6 +122,16 @@ an "Active" badge. Register the webhook notification URL
 for byte -- Square signs its webhook payloads over that exact URL plus the
 raw body, so any mismatch fails every signature check.
 
+Open `/admin/square` and use **Diagnostics**:
+
+- **Run Checks** walks every step a Square sale takes to reach local
+  stock: connection, permissions, location, links, webhook settings, the
+  webhook subscription on Square, a live delivery test (Square sends this
+  app a sample event), and recent sync activity.
+- **Test sale** (sandbox only) rings up one unit of a linked product on
+  Square, then follows it back: order completed, webhook received, local
+  stock down by one, sale recorded. The unit is put back afterwards.
+
 ## How the sync behaves
 
 - **Local stock is the source of truth.** Local adjustments (stock added,
@@ -128,15 +147,26 @@ raw body, so any mismatch fails every signature check.
   `square.manual_change_overridden` event is logged.
 - **Drift is fixed in one direction.** `square:reconcile --fix` and the admin
   page's per-row resolve push local counts to Square.
-- **Switching between sandbox and production resets the sync.** They're
-  separate Square accounts, so the first request after `SQUARE_ENVIRONMENT`
-  changes does four things: it unlinks every product, clears the in-app sync
-  location, restarts the catalog, inventory and sales watermarks at the time
-  of the switch, and logs `square.environment_changed`. After that, relink
-  products against the new account. Sales recorded from the sandbox are
-  tagged `environment: sandbox`.
-- **Stale links are flagged, never removed.** `square:verify-links`, which
-  also runs as part of the admin page's Run Sync Check, looks up every linked
-  Square item and marks each link OK, Missing, Archived or Not at location.
-  Missing links stop syncing until they're unlinked or relinked. A link whose
-  item comes back is live again on the next check.
+- **The connection is checked live.** Opening the Square Sync page, Run
+  Sync Check, and `square:check` every 15 minutes each ask Square which
+  account the token belongs to, whether it's still valid, has the
+  permissions the sync needs, and whether the sync location is active --
+  then look up every linked item. The page shows the connection as Online
+  or Offline with what's wrong, and a check older than an hour is flagged
+  (the scheduler isn't running).
+- **Changing Square accounts resets the sync.** Links are only meaningful
+  on the account they were made on. Switching `SQUARE_ENVIRONMENT` (caught
+  before the next API call) or pointing the token at a different seller
+  (caught by the next check) unlinks every product, clears the in-app sync
+  location, restarts the catalog, inventory and sales watermarks, and logs
+  `square.account_changed`. Then relink products against the new account.
+  Sales recorded from the sandbox are tagged `environment: sandbox`.
+- **Stale links go offline, never removed.** Each check marks every link
+  Online, Offline (its Square item no longer exists on this account --
+  it stops syncing), Archived, or Not at location. While the connection
+  itself is down, every link shows Offline. A link whose item comes back
+  is online again on the next check.
+- **Admins are told when it changes.** When a check finds something new
+  wrong -- or everything recovers -- it's logged (`square.health_degraded`
+  / `square.health_restored`) and sent through `AdminAlerts`. Checks that
+  find nothing new stay quiet.

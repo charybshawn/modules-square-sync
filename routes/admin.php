@@ -19,9 +19,13 @@ Route::prefix('admin')
         Route::prefix('square')->name('square.')->group(function () {
             Route::get('/', [SquareSyncController::class, 'index'])->name('index');
             Route::post('unlink/{mapping}', [SquareSyncController::class, 'unlink'])->name('unlink');
+            Route::post('health', [SquareSyncController::class, 'health'])->name('health');
             Route::post('sync', [SquareSyncController::class, 'sync'])->name('sync');
             Route::post('resolve-drift', [SquareSyncController::class, 'resolveDrift'])->name('resolve-drift');
-            Route::post('pull-catalog', [SquareSyncController::class, 'pullCatalog'])->name('pull-catalog');
+            Route::post('diagnostics', [SquareSyncController::class, 'diagnostics'])->name('diagnostics');
+            Route::post('test-sale', [SquareSyncController::class, 'startTestSale'])->name('test-sale.start');
+            Route::post('test-sale/{run}/check', [SquareSyncController::class, 'checkTestSale'])->whereUuid('run')->name('test-sale.check');
+            Route::post('test-sale/{run}/pull', [SquareSyncController::class, 'pullTestSale'])->whereUuid('run')->name('test-sale.pull');
             Route::get('catalog-items', [SquareSyncController::class, 'catalogItems'])->name('catalog-items');
             Route::get('link-preview', [SquareSyncController::class, 'linkPreview'])->name('link-preview');
             Route::post('link', [SquareSyncController::class, 'link'])->name('link');

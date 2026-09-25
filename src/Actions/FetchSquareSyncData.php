@@ -35,7 +35,9 @@ class FetchSquareSyncData
         private readonly FetchSquareLocations $fetchLocations,
         private readonly LocalCatalog $catalog,
         private readonly AuditLog $auditLog,
-        private readonly ResetOnEnvironmentChange $resetOnEnvironmentChange,
+        private readonly SquareAccount $account,
+        private readonly CheckSquareHealth $checkHealth,
+        private readonly RunSquareTestSale $testSale,
     ) {}
 
     /**
@@ -51,11 +53,16 @@ class FetchSquareSyncData
     public function handle(bool $onlyNeedingAttention = false): array
     {
         // So the page never lists links left over from the other Square
-        // environment (see ResetOnEnvironmentChange).
-        $this->resetOnEnvironmentChange->handle();
+        // environment (see SquareAccount). The live check -- token, account,
+        // location, links -- runs as soon as the page opens, from the
+        // browser (SquareSyncController::health()), so the page renders
+        // straight away from the last snapshot while it runs.
+        $this->account->guard();
 
         return [
             'connection' => $this->connectionStatus(),
+            'health' => $this->health(),
+            'testSale' => $this->testSale->latest(),
             'mappings' => $this->mappings($onlyNeedingAttention),
             'onlyNeedingAttention' => $onlyNeedingAttention,
             'unmappedProducts' => $this->unmappedProducts(),
@@ -70,7 +77,7 @@ class FetchSquareSyncData
      * own ledgers -- what the sync has actually done lately, without
      * reaching into the host's orders.
      *
-     * @return array{sales_recorded: int, refunds_recorded: int, stock_changes_applied: int, last_sale_at: string|null, links_needing_attention: int, links_verified_at: string|null}
+     * @return array{sales_recorded: int, refunds_recorded: int, stock_changes_applied: int, last_sale_at: string|null, links_needing_attention: int, links_offline: int}
      */
     private function summary(): array
     {
@@ -83,9 +90,26 @@ class FetchSquareSyncData
             'stock_changes_applied' => SquareInventoryChange::where('created_at', '>=', $since)->count(),
             'last_sale_at' => $lastSaleAt !== null ? Carbon::parse($lastSaleAt)->toIso8601String() : null,
             'links_needing_attention' => SquareObjectMapping::needsAttention()->count(),
-            'links_verified_at' => ($verifiedAt = SquareObjectMapping::max('verified_at')) !== null
-                ? Carbon::parse($verifiedAt)->toIso8601String()
-                : null,
+            'links_offline' => SquareObjectMapping::orphaned()->count(),
+        ];
+    }
+
+    /**
+     * The last health check, flagged stale when the schedule should have
+     * run a newer one -- a snapshot that old can't be trusted to say the
+     * sync is fine.
+     */
+    private function health(): ?array
+    {
+        $snapshot = $this->checkHealth->snapshot();
+
+        if ($snapshot === null) {
+            return null;
+        }
+
+        return [
+            ...$snapshot,
+            'stale' => Carbon::parse($snapshot['checked_at'])->isBefore(now()->subMinutes(CheckSquareHealth::STALE_AFTER_MINUTES)),
         ];
     }
 

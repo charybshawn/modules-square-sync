@@ -88,4 +88,17 @@ return [
 
     'retry_sleep_ms' => (int) env('SQUARE_RETRY_SLEEP_MS', 200),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Schedule
+    |--------------------------------------------------------------------------
+    |
+    | The module schedules its own commands: square:check and square:pull-sales
+    | every 15 minutes, square:reconcile hourly. Turn off only if the host
+    | schedules them itself.
+    |
+    */
+
+    'schedule' => (bool) env('SQUARE_SCHEDULE', true),
+
 ];

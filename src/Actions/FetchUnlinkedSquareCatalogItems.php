@@ -10,9 +10,8 @@ use Cultpantry\SquareSync\Square\SquareClient;
  * existing SquareObjectMapping -- the candidate list for manual linking in
  * the admin UI (see SquareSyncController::catalogItems()).
  *
- * Requests both ITEM and ITEM_VARIATION in one paginated call and matches
- * this codebase's one proven pattern for reading them (PullSquareCatalog's
- * own listItems(['ITEM_VARIATION']) call): ListCatalog's `types` filter
+ * Requests both ITEM and ITEM_VARIATION in one paginated call:
+ * ListCatalog's `types` filter
  * returns flat top-level objects of each requested type, not variations
  * nested inside their parent item -- an earlier version of this class
  * assumed item_data.variations would be populated by requesting ITEM alone
@@ -23,9 +22,9 @@ use Cultpantry\SquareSync\Square\SquareClient;
  * Square returns an item relative to its own variations.
  *
  * Unlike FetchSquareLocations, failures are allowed to bubble rather than
- * degrade to an empty list: this runs on-demand from a button click (see
- * SquareSyncController::runArtisanCommand()'s equivalent try/catch at the
- * controller boundary), not on every page load, so there's no silent-page
+ * degrade to an empty list: this runs on-demand from a button click (the
+ * controller turns a failure into a JSON error), not on every page load,
+ * so there's no silent-page
  * tradeoff to make -- the admin should see that the download failed.
  */
 class FetchUnlinkedSquareCatalogItems

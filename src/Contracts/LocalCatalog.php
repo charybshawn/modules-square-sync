@@ -28,12 +28,6 @@ interface LocalCatalog
     public function findMany(array $ids, bool $withTrashed = false): array;
 
     /**
-     * Exact SKU match, including trashed items -- square:pull-catalog links
-     * by SKU and must still recognise an archived local item as taken.
-     */
-    public function findBySku(string $sku): ?LocalItem;
-
-    /**
      * Live (non-trashed) items whose id isn't in $excludeIds, ordered by
      * title -- the admin page's "not yet linked" panel.
      *

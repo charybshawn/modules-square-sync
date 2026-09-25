@@ -36,6 +36,7 @@
     <ActionShelf class="md:hidden" overlay="always">
       <ShelfAction icon="check" label="Run sync check" @click="runSyncCheck" />
       <ShelfAction icon="download" label="Link catalog items" @click="openCatalog" />
+      <ShelfAction icon="shield" label="Diagnostics" target="square-diagnostics" />
       <ShelfAction icon="alert" label="Drift reports" target="square-drift" :count="driftEvents.length" attention />
       <ShelfAction icon="clock" label="Sync activity" target="square-activity" />
     </ActionShelf>
@@ -56,82 +57,33 @@
     </dl>
 
     <div class="space-y-4 md:space-y-6">
-      <div v-if="!connection.configured" class="px-4 pt-4 md:p-0">
-        <AdminAlert level="warning" title="Square isn't fully set up">
-          <span v-if="!connection.access_token_configured">Set SQUARE_ACCESS_TOKEN in .env, then choose a sync location below.</span>
-          <span v-else>Choose a sync location below. Nothing syncs until one is set.</span>
-        </AdminAlert>
-      </div>
-
-      <!-- Connection -->
-      <section :class="SECTION">
-        <div :class="SECTION_HEADER">
-          <h2 class="text-lg font-medium text-gray-900 dark:text-white">Connection</h2>
-        </div>
-        <dl class="divide-y divide-gray-100 dark:divide-gray-700 border-t border-gray-100 dark:border-gray-700">
-          <div class="flex items-center justify-between gap-4 px-4 md:px-6 py-3">
-            <dt class="text-sm text-gray-500 dark:text-gray-400">Environment</dt>
-            <dd>
-              <span class="inline-flex px-2 py-1 text-xs font-medium rounded-full bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 capitalize">
-                {{ connection.environment }}
-              </span>
-            </dd>
-          </div>
-          <div class="flex items-center justify-between gap-4 px-4 md:px-6 py-3">
-            <dt class="text-sm text-gray-500 dark:text-gray-400">Access token</dt>
-            <dd><StatusBadge :ok="connection.access_token_configured" true-label="Configured" false-label="Missing" /></dd>
-          </div>
-          <div class="px-4 md:px-6 py-4">
-            <dt>
-              <InputLabel for="square-location" value="Sync location" />
-            </dt>
-            <dd class="mt-1.5">
-              <p v-if="!connection.access_token_configured" class="text-sm text-gray-500 dark:text-gray-400">
-                Available once the access token is set.
-              </p>
-              <p v-else-if="connection.locations.length === 0" class="text-sm text-amber-700 dark:text-amber-400">
-                Square locations couldn't be loaded. Check the access token, or try again shortly if Square is temporarily unreachable.
-              </p>
-              <template v-else>
-                <select
-                  id="square-location"
-                  v-model="selectedLocationId"
-                  :disabled="locationForm.processing"
-                  class="block w-full md:max-w-md rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white text-base sm:text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500 disabled:opacity-50"
-                  @change="onLocationChange"
-                >
-                  <option value="" disabled>Select a location…</option>
-                  <option v-for="location in connection.locations" :key="location.id" :value="location.id">
-                    {{ location.name }}{{ location.status === 'INACTIVE' ? ' (inactive)' : '' }}
-                  </option>
-                </select>
-                <InputError class="mt-1.5" :message="locationForm.errors.location_id" />
-                <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
-                  <template v-if="locationForm.processing">Saving…</template>
-                  <template v-else-if="connection.location_source === 'env'">Set by SQUARE_LOCATION_ID in .env. Choosing one here takes over.</template>
-                  <template v-else>Stock pushes and Square sales use this location. Saves when changed.</template>
-                </p>
-              </template>
-            </dd>
-          </div>
-        </dl>
-      </section>
+      <ConnectionPanel
+        :connection="connection"
+        :health="liveHealth"
+        :checking="healthChecking"
+        :check-error="healthError"
+        @check="checkHealth"
+      />
 
       <!-- Linked products. No overflow-hidden: it breaks DataTable's sticky toolbar. -->
       <section :class="SECTION">
         <div :class="SECTION_HEADER">
           <h2 class="text-lg font-medium text-gray-900 dark:text-white">Linked products</h2>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Local products mapped to a Square catalog item.
-            {{ summary.links_verified_at ? `Links last checked ${formatTimestamp(summary.links_verified_at)}.` : 'Links haven\'t been checked yet -- Run Sync Check to check them.' }}
+            Local products mapped to a Square catalog item. Each link is checked against Square whenever the connection is.
           </p>
         </div>
 
-        <div v-if="summary.links_needing_attention > 0 || onlyNeedingAttention" class="px-4 md:px-6 pb-4">
-          <AdminAlert level="warning" :title="summary.links_needing_attention === 1 ? '1 link needs attention' : `${summary.links_needing_attention} links need attention`">
+        <div v-if="connectionDown && mappings.meta.total > 0" class="px-4 md:px-6 pb-4">
+          <AdminAlert level="error" title="Every link is offline">
+            The Square connection is down (see Connection above), so no product syncs until it's fixed.
+          </AdminAlert>
+        </div>
+        <div v-else-if="summary.links_needing_attention > 0 || onlyNeedingAttention" class="px-4 md:px-6 pb-4">
+          <AdminAlert :level="summary.links_offline > 0 ? 'error' : 'warning'" :title="attentionTitle">
             <p>
-              Missing links point at a Square item that no longer exists on this account, so they don't sync. Archived or
-              not-at-location items can't sell at your sync location. Fix them on Square, or unlink or relink them here.
+              Offline links point at a Square item that no longer exists on this account, so they don't sync -- relink or
+              unlink them. Archived or not-at-location items can't sell at your sync location; fix them on Square.
             </p>
             <button
               type="button"
@@ -360,6 +312,15 @@
         </div>
       </section>
 
+      <DiagnosticsPanel
+        id="square-diagnostics"
+        class="scroll-mt-40 md:scroll-mt-20"
+        :environment="connection.environment"
+        :initial-test-sale="testSale"
+        @health="applyHealth"
+        @changed="refreshAfterSync"
+      />
+
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
         <!-- Drift -->
         <section id="square-drift" :class="[SECTION, 'scroll-mt-40 md:scroll-mt-20']">
@@ -440,13 +401,21 @@
             </AdminAlert>
           </div>
 
+          <div v-else-if="syncResult && syncResult.health.status !== 'online'" class="px-4 sm:px-6 pb-4">
+            <AdminAlert level="error" title="Square sync is offline, so stock wasn't compared">
+              <ul class="list-disc pl-5 space-y-1">
+                <li v-for="problem in syncResult.health.problems" :key="problem.key">{{ problem.message }}</li>
+              </ul>
+            </AdminAlert>
+          </div>
+
           <template v-else-if="syncResult">
-            <div v-if="syncResult.links.issues.length > 0" class="pb-4">
+            <div v-if="linkIssues.length > 0" class="pb-4">
               <h3 class="px-4 sm:px-6 pb-2 text-sm font-medium text-gray-900 dark:text-white">
-                {{ syncResult.links.issues.length === 1 ? '1 link needs attention' : `${syncResult.links.issues.length} links need attention` }}
+                {{ linkIssues.length === 1 ? '1 link needs attention' : `${linkIssues.length} links need attention` }}
               </h3>
               <ul class="divide-y divide-gray-100 dark:divide-gray-700 border-y border-gray-100 dark:border-gray-700">
-                <li v-for="issue in syncResult.links.issues" :key="issue.mapping_id" class="px-4 sm:px-6 py-3 flex items-center gap-3">
+                <li v-for="issue in linkIssues" :key="issue.mapping_id" class="px-4 sm:px-6 py-3 flex items-center gap-3">
                   <p class="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-white">{{ issue.product_title ?? '(deleted product)' }}</p>
                   <span :class="['shrink-0 inline-flex px-2 py-0.5 text-xs font-medium rounded-full', ISSUE_BADGES[issue.status].class]">
                     {{ ISSUE_BADGES[issue.status].label }}
@@ -456,7 +425,7 @@
               <p class="px-4 sm:px-6 pt-2 text-xs text-gray-500 dark:text-gray-400">Fix them on Square, or unlink or relink them from Linked products.</p>
             </div>
 
-            <h3 v-if="syncResult.links.issues.length > 0 && syncResult.checked > 0" class="px-4 sm:px-6 pb-2 text-sm font-medium text-gray-900 dark:text-white">Stock</h3>
+            <h3 v-if="linkIssues.length > 0 && syncResult.checked > 0" class="px-4 sm:px-6 pb-2 text-sm font-medium text-gray-900 dark:text-white">Stock</h3>
             <p v-if="syncResult.checked === 0" class="px-4 sm:px-6 pb-6 text-sm text-gray-600 dark:text-gray-400">
               No linked products to check yet.
             </p>
@@ -514,7 +483,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import axios from 'axios'
 import { router, useForm } from '@inertiajs/vue3'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
@@ -526,32 +495,15 @@ import AdminAlert from '@/Components/Admin/AdminAlert.vue'
 import DataTable, { type Action, type Column } from '@/Components/Admin/DataTable.vue'
 import Pagination from '@/Components/Admin/Pagination.vue'
 import ResponsiveModal from '@/Components/ResponsiveModal.vue'
-import InputLabel from '@/Components/InputLabel.vue'
-import InputError from '@/Components/InputError.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
-import StatusBadge from './Shared/StatusBadge.vue'
 import CatalogBadges from './Shared/CatalogBadges.vue'
 import CatalogLinkControl from './Shared/CatalogLinkControl.vue'
 import SeverityBadge from './Shared/SeverityBadge.vue'
+import ConnectionPanel from './Shared/ConnectionPanel.vue'
+import DiagnosticsPanel from './Shared/DiagnosticsPanel.vue'
+import { formatTimestamp, type ConnectionConfig, type Health, type LinkIssue, type TestSaleRun } from './Shared/types'
 
 defineOptions({ layout: (h: any, page: any) => h(AdminLayout, { hideBreadcrumbOnMobile: true }, () => page) })
-
-interface SquareLocation {
-  id: string
-  name: string
-  status: string
-  address: string | null
-}
-
-interface ConnectionStatus {
-  access_token_configured: boolean
-  location_id_configured: boolean
-  configured: boolean
-  environment: string
-  locations: SquareLocation[]
-  selected_location_id: string | null
-  location_source: 'setting' | 'env' | null
-}
 
 interface MappingRow {
   id: number
@@ -642,22 +594,13 @@ interface SyncSummary {
   stock_changes_applied: number
   last_sale_at: string | null
   links_needing_attention: number
-  links_verified_at: string | null
-}
-
-type LinkIssue = 'missing' | 'archived' | 'not_at_location'
-
-interface LinkCheck {
-  checked: number
-  ok: number
-  missing: number
-  archived: number
-  not_at_location: number
-  issues: { mapping_id: number; product_id: number; product_title: string | null; square_object_id: string; status: LinkIssue }[]
+  links_offline: number
 }
 
 interface Props {
-  connection: ConnectionStatus
+  connection: ConnectionConfig
+  health?: Health | null
+  testSale?: TestSaleRun | null
   mappings: Paginated<MappingRow>
   unmappedProducts: UnmappedProducts
   driftEvents: SquareEventRow[]
@@ -666,15 +609,50 @@ interface Props {
   onlyNeedingAttention?: boolean
 }
 
-// summary is newer than the rest of the page's props -- defaulted so the
-// page still renders if it's ever published ahead of the PHP that sends
-// it (a deploy that hasn't reloaded PHP yet), instead of crashing.
+// Newer props are defaulted so the page still renders if it's ever
+// published ahead of the PHP that sends them (a deploy that hasn't
+// reloaded PHP yet), instead of crashing.
 const props = withDefaults(defineProps<Props>(), {
-  summary: () => ({ sales_recorded: 0, refunds_recorded: 0, stock_changes_applied: 0, last_sale_at: null, links_needing_attention: 0, links_verified_at: null }),
+  health: null,
+  testSale: null,
+  summary: () => ({ sales_recorded: 0, refunds_recorded: 0, stock_changes_applied: 0, last_sale_at: null, links_needing_attention: 0, links_offline: 0 }),
   onlyNeedingAttention: false,
 })
 
 const { confirmDialog, askDialog } = useConfirmDialog()
+
+// ── Connection health ──────────────────────────────────────────────────
+
+// Starts from the last stored check, then is replaced by a live one the
+// moment the page opens -- so what's shown is what Square says now.
+const liveHealth = ref<Health | null>(props.health)
+const healthChecking = ref(false)
+const healthError = ref<string | null>(null)
+
+const connectionDown = computed(() => liveHealth.value !== null && liveHealth.value.status !== 'online')
+
+// A check restamps every link's status, so the table and counts refresh.
+const applyHealth = (health: Health) => {
+  liveHealth.value = health
+  router.reload({ only: ['mappings', 'summary', 'unmappedProducts', 'recentActivity'] })
+}
+
+const checkHealth = async () => {
+  if (healthChecking.value) return
+
+  healthChecking.value = true
+  healthError.value = null
+  try {
+    const response = await axios.post(route('admin.square.health'))
+    applyHealth(response.data)
+  } catch (error: any) {
+    healthError.value = error?.response?.data?.error ?? error?.response?.data?.message ?? 'Square didn\'t respond. Try again in a moment.'
+  } finally {
+    healthChecking.value = false
+  }
+}
+
+onMounted(checkHealth)
 
 // Full-bleed white on mobile, a card on desktop -- the host's dashboard
 // section treatment (see the costing module's Dashboard).
@@ -689,18 +667,26 @@ const TONES: Record<StatTone, string> = {
   danger: 'text-red-600 dark:text-red-400',
 }
 
-const formatTimestamp = (value: string | null): string => {
-  if (!value) return 'Never'
-  return new Date(value).toLocaleString()
+const CONNECTION_LABELS: Record<Health['status'] | 'unknown', string> = {
+  online: 'Online',
+  offline: 'Offline',
+  not_configured: 'Not set up',
+  unknown: 'Checking…',
 }
 
 const heroHeadline = computed<HeroStat>(() => ({
   label: 'Linked products',
   value: props.mappings.meta.total,
-  hint: props.summary.links_needing_attention > 0
-    ? `${props.summary.links_needing_attention} need attention`
+  hint: connectionDown.value && props.mappings.meta.total > 0
+    ? 'All offline'
+    : props.summary.links_offline > 0
+      ? `${props.summary.links_offline} offline`
+      : props.summary.links_needing_attention > 0
+        ? `${props.summary.links_needing_attention} need attention`
     : props.unmappedProducts.total > 0 ? `${props.unmappedProducts.total} not linked yet` : 'Every product is linked',
-  hintTone: props.summary.links_needing_attention > 0 || props.unmappedProducts.total > 0 ? 'warning' : 'good',
+  hintTone: connectionDown.value || props.summary.links_offline > 0
+    ? 'danger'
+    : props.summary.links_needing_attention > 0 || props.unmappedProducts.total > 0 ? 'warning' : 'good',
 }))
 
 const heroStats = computed<HeroStat[]>(() => [
@@ -712,56 +698,11 @@ const heroStats = computed<HeroStat[]>(() => [
   { label: 'Stock changes from Square', value: props.summary.stock_changes_applied, hint: 'Last 30 days' },
   {
     label: 'Connection',
-    value: props.connection.configured ? 'Ready' : 'Needs setup',
-    tone: props.connection.configured ? 'good' : 'danger',
+    value: CONNECTION_LABELS[liveHealth.value?.status ?? 'unknown'],
+    tone: liveHealth.value?.status === 'online' ? 'good' : liveHealth.value ? 'danger' : 'default',
     hint: props.connection.environment === 'production' ? 'Production' : 'Sandbox',
   },
 ])
-
-// ── Sync location (save-on-change) ──────────────────────────────────────
-
-// Local, since the prop only reflects what's saved. Synced back from the
-// prop so a refused save (or another tab's save) snaps the select back.
-const selectedLocationId = ref(props.connection.selected_location_id ?? '')
-
-watch(
-  () => props.connection.selected_location_id,
-  (value) => {
-    selectedLocationId.value = value ?? ''
-  },
-)
-
-const locationForm = useForm({ location_id: '' })
-
-// Changing the location repoints every stock push and every Square sale
-// the sync applies, so switching away from a saved one confirms first.
-const onLocationChange = async () => {
-  const previous = props.connection.selected_location_id ?? ''
-  const next = selectedLocationId.value
-
-  if (!next || next === previous) return
-
-  if (previous !== '') {
-    const confirmed = await confirmDialog({
-      title: 'Change sync location?',
-      message: 'Stock pushes and Square sales will use the new location from now on. Counts already on Square at the old location aren\'t changed.',
-      confirmLabel: 'Change Location',
-    })
-
-    if (!confirmed) {
-      selectedLocationId.value = previous
-      return
-    }
-  }
-
-  locationForm.location_id = next
-  locationForm.post(route('admin.square.location'), {
-    preserveScroll: true,
-    onError: () => {
-      selectedLocationId.value = previous
-    },
-  })
-}
 
 // ── Linked products ────────────────────────────────────────────────────
 
@@ -779,7 +720,7 @@ const mappingActions: Action[] = [
 ]
 
 const ISSUE_BADGES: Record<LinkIssue, { label: string; class: string }> = {
-  missing: { label: 'Missing on Square', class: 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200' },
+  missing: { label: 'Offline -- missing on Square', class: 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200' },
   archived: { label: 'Archived on Square', class: 'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200' },
   not_at_location: { label: 'Not at location', class: 'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200' },
 }
@@ -787,28 +728,30 @@ const ISSUE_BADGES: Record<LinkIssue, { label: string; class: string }> = {
 const isIssue = (status: MappingRow['verification_status']): status is LinkIssue =>
   status === 'missing' || status === 'archived' || status === 'not_at_location'
 
-// A verification problem outranks the plain sync status in the badge.
-const linkStatus = (item: MappingRow): { label: string; class: string } => {
-  if (isIssue(item.verification_status)) {
-    return ISSUE_BADGES[item.verification_status]
-  }
-
-  const label = item.sync_status.charAt(0).toUpperCase() + item.sync_status.slice(1)
-
-  return { label, class: syncStatusClass(item.sync_status) }
+const LINK_BADGES = {
+  online: { label: 'Online', class: 'bg-green-100 dark:bg-green-900/40 text-green-800 dark:text-green-200' },
+  offline: { label: 'Offline -- connection down', class: 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200' },
+  unchecked: { label: 'Not checked yet', class: 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200' },
+  conflict: { label: 'Conflict', class: 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200' },
 }
+
+// One status per link: a dead connection takes every link offline; then
+// what the last check found on Square; then the link's own sync state.
+const linkStatus = (item: MappingRow): { label: string; class: string } => {
+  if (connectionDown.value) return LINK_BADGES.offline
+  if (isIssue(item.verification_status)) return ISSUE_BADGES[item.verification_status]
+  if (item.sync_status === 'conflict') return LINK_BADGES.conflict
+  return item.verification_status === 'ok' ? LINK_BADGES.online : LINK_BADGES.unchecked
+}
+
+const attentionTitle = computed(() => {
+  const { links_offline: offline, links_needing_attention: total } = props.summary
+  if (offline > 0) return offline === 1 ? '1 link is offline' : `${offline} links are offline`
+  return total === 1 ? '1 link needs attention' : `${total} links need attention`
+})
 
 const toggleNeedingAttention = () => {
   router.get(route('admin.square.index'), props.onlyNeedingAttention ? {} : { links: 'attention' }, { preserveScroll: true, preserveState: true })
-}
-
-const syncStatusClass = (status: MappingRow['sync_status']): string => {
-  return {
-    linked: 'bg-green-100 dark:bg-green-900/40 text-green-800 dark:text-green-200',
-    pending: 'bg-yellow-100 dark:bg-yellow-900/40 text-yellow-800 dark:text-yellow-200',
-    conflict: 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200',
-    orphaned: 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200',
-  }[status] ?? 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200'
 }
 
 const changeMappingsPage = (url: string | null) => {
@@ -868,7 +811,7 @@ interface ReconcileResult {
   drifted: number
   corrected: number
   rows: DriftRow[]
-  links: LinkCheck
+  health: Health
 }
 
 // sync() returns ReconcileInventoryDrift's structured result; the dialog
@@ -886,6 +829,8 @@ const resolvingProductIds = ref<Set<number>>(new Set())
 const resolvedRows = ref<Record<number, true>>({})
 const pushingAll = ref(false)
 
+const linkIssues = computed(() => syncResult.value?.health.links?.issues ?? [])
+
 const unresolvedRows = computed(() => syncResult.value?.rows.filter((row) => !resolvedRows.value[row.product_id]) ?? [])
 
 const runSyncCheck = async () => {
@@ -900,6 +845,7 @@ const runSyncCheck = async () => {
   try {
     const response = await axios.post(route('admin.square.sync'))
     syncResult.value = response.data
+    liveHealth.value = response.data.health
   } catch (error: any) {
     syncResultError.value = error?.response?.data?.error ?? 'Square didn\'t respond.'
   } finally {
@@ -935,13 +881,18 @@ const pushAllRows = async () => {
   }
 }
 
+// Every sync check re-verifies links (statuses and the attention count
+// change), and pushes or a test sale change stock, timestamps and the
+// activity feed.
+const refreshAfterSync = () => {
+  router.reload({ only: ['mappings', 'driftEvents', 'recentActivity', 'summary', 'unmappedProducts'] })
+}
+
 const closeSyncResultModal = () => {
   showSyncResultModal.value = false
 
-  // Every sync check re-verifies links (statuses and the attention count
-  // change), and any pushes change timestamps and the activity feed.
   if (syncResult.value !== null) {
-    router.reload({ only: ['mappings', 'driftEvents', 'recentActivity', 'summary'] })
+    refreshAfterSync()
   }
 }
 

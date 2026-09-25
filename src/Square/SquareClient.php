@@ -2,7 +2,7 @@
 
 namespace Cultpantry\SquareSync\Square;
 
-use Cultpantry\SquareSync\Actions\ResetOnEnvironmentChange;
+use Cultpantry\SquareSync\Actions\SquareAccount;
 use Cultpantry\SquareSync\Contracts\AuditLog;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
@@ -32,7 +32,7 @@ final class SquareClient
      * Endpoints whose successful response bodies are never written to the
      * audit trail -- see loggableBody().
      */
-    private const PERSONAL_DATA_PATHS = ['/v2/customers', '/v2/orders'];
+    private const PERSONAL_DATA_PATHS = ['/v2/customers', '/v2/orders', '/v2/payments'];
 
     private ?CatalogApi $catalogApi = null;
 
@@ -43,6 +43,12 @@ final class SquareClient
     private ?OrdersApi $ordersApi = null;
 
     private ?CustomersApi $customersApi = null;
+
+    private ?OAuthApi $oauthApi = null;
+
+    private ?WebhooksApi $webhooksApi = null;
+
+    private ?PaymentsApi $paymentsApi = null;
 
     public function __construct(private readonly AuditLog $auditLog) {}
 
@@ -71,6 +77,21 @@ final class SquareClient
         return $this->customersApi ??= new CustomersApi($this);
     }
 
+    public function oauth(): OAuthApi
+    {
+        return $this->oauthApi ??= new OAuthApi($this);
+    }
+
+    public function webhooks(): WebhooksApi
+    {
+        return $this->webhooksApi ??= new WebhooksApi($this);
+    }
+
+    public function payments(): PaymentsApi
+    {
+        return $this->paymentsApi ??= new PaymentsApi($this);
+    }
+
     /**
      * @throws SquareException when Square returns an error that either
      *                         isn't retryable, or survived every retry attempt.
@@ -80,7 +101,7 @@ final class SquareClient
         // Every Square call goes through here, so this is where a switch
         // between sandbox and production is noticed before any stored id
         // from the other environment gets sent.
-        app(ResetOnEnvironmentChange::class)->handle();
+        app(SquareAccount::class)->guard();
 
         // Falls through to the host app's ambient trace id (set once per
         // request/queued job by App\Http\Middleware\ResolveTraceContext)

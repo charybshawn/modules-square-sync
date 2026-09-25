@@ -5,6 +5,7 @@ namespace Cultpantry\SquareSync\Http\Controllers\Admin;
 use App\Actions\GetSiteSetting;
 use App\Actions\UpdateSiteSetting;
 use App\Http\Controllers\Controller;
+use Cultpantry\SquareSync\Actions\CheckSquareHealth;
 use Cultpantry\SquareSync\Actions\FetchSquareInventoryCount;
 use Cultpantry\SquareSync\Actions\FetchSquareLocations;
 use Cultpantry\SquareSync\Actions\FetchSquareSyncData;
@@ -12,19 +13,20 @@ use Cultpantry\SquareSync\Actions\FetchUnlinkedSquareCatalogItems;
 use Cultpantry\SquareSync\Actions\GetSquareLocationId;
 use Cultpantry\SquareSync\Actions\ReconcileInventoryDrift;
 use Cultpantry\SquareSync\Actions\ResolveSquareInventoryDrift;
-use Cultpantry\SquareSync\Actions\VerifySquareLinks;
+use Cultpantry\SquareSync\Actions\RunSquareDiagnostics;
+use Cultpantry\SquareSync\Actions\RunSquareTestSale;
 use Cultpantry\SquareSync\Contracts\AuditLog;
 use Cultpantry\SquareSync\Contracts\LocalCatalog;
 use Cultpantry\SquareSync\Contracts\LocalInventory;
 use Cultpantry\SquareSync\Contracts\LocalItem;
 use Cultpantry\SquareSync\Jobs\PushInventoryCountJob;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
+use DomainException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controllers\HasMiddleware;
 use Illuminate\Routing\Controllers\Middleware;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
@@ -74,39 +76,81 @@ class SquareSyncController extends Controller implements HasMiddleware
     }
 
     /**
-     * Triggers the same whole-catalog reconcile the `square:reconcile`
-     * schedule runs -- calls ReconcileInventoryDrift directly (the same
-     * Action the console command itself uses) rather than shelling out via
-     * Artisan::call(), so the response carries real structured rows for the
-     * admin UI's results modal instead of the command's captured console
-     * text (which used to get dumped wholesale into the flash message as a
-     * raw ASCII table -- unreadable outside a terminal). Report-only by
-     * default -- no fix -- matching the command's own safe default. See
-     * resolveDrift() below for how a drifted row actually gets corrected.
+     * The live health check -- token, account, location, every link --
+     * that the page runs from the browser as soon as it opens, and again
+     * from its "Check now" button. See CheckSquareHealth.
      */
-    public function sync(VerifySquareLinks $verifySquareLinks, ReconcileInventoryDrift $reconcileInventoryDrift): JsonResponse
+    public function health(CheckSquareHealth $checkSquareHealth): JsonResponse
+    {
+        $this->authorize('sync', new SquareObjectMapping);
+
+        return response()->json($checkSquareHealth->handle());
+    }
+
+    /**
+     * Run Sync Check: the health check, then -- only if the connection is
+     * sound, since a comparison against an unreachable or wrong account
+     * means nothing -- a report-only comparison of every link's stock with
+     * Square (the same Action `square:reconcile` runs). Nothing is changed;
+     * see resolveDrift() for how a drifted row gets corrected.
+     */
+    public function sync(CheckSquareHealth $checkSquareHealth, ReconcileInventoryDrift $reconcileInventoryDrift): JsonResponse
     {
         // A fresh, unpersisted instance: the 'sync' ability doesn't
         // inspect the model at all (SquareObjectMappingPolicy::sync()
-        // only checks $user->isAdmin()), and this endpoint triggers a
-        // whole-catalog check, not a single mapping's re-sync. Route and
-        // constructor middleware already gate this to admins; this call
-        // is the policy layer of the app's required three-layer defense
-        // in depth.
+        // only checks $user->isAdmin()). Route and constructor middleware
+        // already gate this to admins; this call is the policy layer of
+        // the app's required three-layer defense in depth.
         $this->authorize('sync', new SquareObjectMapping);
 
-        try {
-            // Links first, so drift is only compared for links that still
-            // point at something real (orphaned ones drop out of it).
-            $links = $verifySquareLinks->handle();
+        $health = $checkSquareHealth->handle();
 
-            return response()->json([
-                ...$reconcileInventoryDrift->handle(fix: false),
-                'links' => $links,
-            ]);
+        if ($health['status'] !== 'online') {
+            return response()->json(['health' => $health, 'checked' => 0, 'drifted' => 0, 'corrected' => 0, 'rows' => []]);
+        }
+
+        try {
+            return response()->json([...$reconcileInventoryDrift->handle(fix: false), 'health' => $health]);
         } catch (Throwable $e) {
             return response()->json(['error' => "Square request failed: {$e->getMessage()}"], 502);
         }
+    }
+
+    /**
+     * The Diagnostics panel's "Run checks" -- see RunSquareDiagnostics.
+     */
+    public function diagnostics(RunSquareDiagnostics $runSquareDiagnostics): JsonResponse
+    {
+        $this->authorize('sync', new SquareObjectMapping);
+
+        return response()->json($runSquareDiagnostics->handle());
+    }
+
+    /**
+     * Starts a sandbox test sale of one unit of a linked product -- see
+     * RunSquareTestSale.
+     */
+    public function startTestSale(Request $request, RunSquareTestSale $runSquareTestSale): JsonResponse
+    {
+        $this->authorize('sync', new SquareObjectMapping);
+
+        $validated = $request->validate(['product_id' => ['required', 'integer']]);
+
+        return $this->testSaleResponse(fn () => $runSquareTestSale->start($validated['product_id'], $request->user()));
+    }
+
+    public function checkTestSale(string $run, RunSquareTestSale $runSquareTestSale): JsonResponse
+    {
+        $this->authorize('sync', new SquareObjectMapping);
+
+        return $this->testSaleResponse(fn () => $runSquareTestSale->check($run));
+    }
+
+    public function pullTestSale(string $run, RunSquareTestSale $runSquareTestSale): JsonResponse
+    {
+        $this->authorize('sync', new SquareObjectMapping);
+
+        return $this->testSaleResponse(fn () => $runSquareTestSale->pullNow($run));
     }
 
     /**
@@ -141,27 +185,6 @@ class SquareSyncController extends Controller implements HasMiddleware
     }
 
     /**
-     * Links Square catalog items to local products by SKU, via
-     * `php artisan square:pull-catalog` -- same Artisan::call() wrapper
-     * pattern as sync() above, not a reimplementation of its matching
-     * logic. dry_run previews matches without writing any
-     * SquareObjectMapping rows, mirroring the command's own --dry-run flag
-     * and giving the admin UI the same safe-by-default shape sync() has.
-     */
-    public function pullCatalog(Request $request): RedirectResponse
-    {
-        $this->authorize('sync', new SquareObjectMapping);
-
-        $dryRun = $request->boolean('dry_run');
-
-        return $this->runArtisanCommand(
-            'square:pull-catalog',
-            $dryRun ? ['--dry-run' => true] : [],
-            'Square catalog link check completed.',
-        );
-    }
-
-    /**
      * On-demand JSON fetch of every Square catalog item not yet linked to a
      * local product -- the data source for the admin page's manual-linking
      * panel. A GET called from the frontend via axios rather than an
@@ -172,8 +195,8 @@ class SquareSyncController extends Controller implements HasMiddleware
      *
      * Errors are surfaced as JSON rather than an Inertia flash message --
      * this response never goes through Inertia at all -- but the intent
-     * matches runArtisanCommand()'s: a failed Square call should read as a
-     * friendly message here, not a raw 500 in the browser console.
+     * is the same: a failed Square call should read as a friendly message
+     * here, not a raw 500 in the browser console.
      */
     public function catalogItems(FetchUnlinkedSquareCatalogItems $fetchCatalogItems): JsonResponse
     {
@@ -228,9 +251,7 @@ class SquareSyncController extends Controller implements HasMiddleware
      * mapping table's own contract -- see SquareObjectMapping's class docs)
      * with one local product, chosen by an admin from the catalog-items
      * panel rather than matched automatically by SKU. Reuses linkTo()'s
-     * existing idempotent link/relink behavior, same as PullSquareCatalog's
-     * SKU-matched links -- there's only one way a mapping row gets created,
-     * manual or automatic.
+     * existing idempotent link/relink behavior.
      *
      * For a tracked product, the admin must say which side is correct for
      * this product's starting count -- inventory_source: 'local' pushes
@@ -390,26 +411,14 @@ class SquareSyncController extends Controller implements HasMiddleware
         return $item;
     }
 
-    /**
-     * Shared by sync() and pullCatalog() -- both just wrap an Artisan
-     * command for this page's "Actions" menu. The commands themselves are
-     * deliberately allowed to let a SquareException bubble when run from
-     * the CLI (a failed hourly `square:reconcile` run should show up as a
-     * failed scheduled job for monitoring, not swallow the failure), but
-     * an admin clicking a button here should never see a raw stack trace
-     * just because Square rejected the request -- same "degrade to an
-     * empty/friendly result" tradeoff FetchSquareLocations already makes.
-     */
-    private function runArtisanCommand(string $command, array $parameters, string $fallbackMessage): RedirectResponse
+    private function testSaleResponse(callable $run): JsonResponse
     {
         try {
-            Artisan::call($command, $parameters);
+            return response()->json($run());
+        } catch (DomainException $e) {
+            return response()->json(['error' => $e->getMessage()], 422);
         } catch (Throwable $e) {
-            return redirect()->back()->with('warning', "Square request failed: {$e->getMessage()}");
+            return response()->json(['error' => "Square request failed: {$e->getMessage()}"], 502);
         }
-
-        $output = trim(Artisan::output());
-
-        return redirect()->back()->with('success', $output !== '' ? $output : $fallbackMessage);
     }
 }

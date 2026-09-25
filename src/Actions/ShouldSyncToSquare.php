@@ -14,7 +14,7 @@ class ShouldSyncToSquare
     public function __construct(
         private readonly GetSiteSetting $getSiteSetting,
         private readonly GetSquareLocationId $getLocationId,
-        private readonly ResetOnEnvironmentChange $resetOnEnvironmentChange,
+        private readonly SquareAccount $account,
     ) {}
 
     public function handle(): bool
@@ -25,7 +25,7 @@ class ShouldSyncToSquare
 
         // Before anything is queued against a link: after a sandbox <->
         // production switch those links belong to the other account.
-        $this->resetOnEnvironmentChange->handle();
+        $this->account->guard();
 
         return filled(config('square-sync.access_token')) && filled($this->getLocationId->handle());
     }
