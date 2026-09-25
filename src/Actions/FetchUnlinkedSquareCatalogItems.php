@@ -33,7 +33,7 @@ class FetchUnlinkedSquareCatalogItems
     public function __construct(private readonly SquareClient $client) {}
 
     /**
-     * @return array<int, array{square_object_id: string, square_parent_object_id: ?string, name: string, sku: ?string, price: ?float, currency: ?string, archived: bool}>
+     * @return array<int, array{square_object_id: string, square_parent_object_id: ?string, name: string, sku: ?string, price: ?float, currency: ?string, archived: bool, categories: array<int, string>}>
      */
     public function handle(): array
     {
@@ -45,10 +45,20 @@ class FetchUnlinkedSquareCatalogItems
 
         $itemNames = [];
         $archivedItems = [];
+        $itemCategoryIds = [];
+        $categoryNames = [];
         $variations = [];
 
-        foreach ($this->client->catalog()->listItems(['ITEM', 'ITEM_VARIATION']) as $object) {
+        foreach ($this->client->catalog()->listItems(['ITEM', 'ITEM_VARIATION', 'CATEGORY']) as $object) {
+            if (($object['type'] ?? null) === 'CATEGORY') {
+                $categoryNames[$object['id']] = $object['category_data']['name'] ?? null;
+
+                continue;
+            }
+
             if (($object['type'] ?? null) === 'ITEM') {
+                $itemCategoryIds[$object['id']] = $this->categoryIds($object['item_data'] ?? []);
+
                 $itemNames[$object['id']] = $object['item_data']['name'] ?? null;
 
                 if (($object['item_data']['is_archived'] ?? false) === true) {
@@ -63,7 +73,7 @@ class FetchUnlinkedSquareCatalogItems
             }
         }
 
-        $items = array_map(function (array $object) use ($itemNames, $archivedItems) {
+        $items = array_map(function (array $object) use ($itemNames, $archivedItems, $itemCategoryIds, $categoryNames) {
             $variation = $object['item_variation_data'] ?? [];
             $itemId = $variation['item_id'] ?? null;
             $itemName = ($itemId !== null ? $itemNames[$itemId] ?? null : null) ?? '(unnamed item)';
@@ -89,11 +99,41 @@ class FetchUnlinkedSquareCatalogItems
                 'price' => $priceMoney !== null ? ((int) ($priceMoney['amount'] ?? 0)) / 100 : null,
                 'currency' => $priceMoney['currency'] ?? null,
                 'archived' => $itemId !== null && isset($archivedItems[$itemId]),
+                'categories' => $this->categoryNames($itemCategoryIds[$itemId] ?? [], $categoryNames),
             ];
         }, $variations);
 
         usort($items, fn (array $a, array $b) => $a['name'] <=> $b['name']);
 
         return $items;
+    }
+
+    /**
+     * An item can sit in several categories: `categories` (current API),
+     * plus the `reporting_category` Square reports sales under, plus the
+     * legacy single `category_id` older items still carry.
+     *
+     * @return array<int, string>
+     */
+    private function categoryIds(array $itemData): array
+    {
+        return array_values(array_unique(array_filter([
+            ...array_column($itemData['categories'] ?? [], 'id'),
+            $itemData['reporting_category']['id'] ?? null,
+            $itemData['category_id'] ?? null,
+        ])));
+    }
+
+    /**
+     * @param  array<int, string>  $ids
+     * @param  array<string, string|null>  $names
+     * @return array<int, string>
+     */
+    private function categoryNames(array $ids, array $names): array
+    {
+        $resolved = array_values(array_unique(array_filter(array_map(fn (string $id) => $names[$id] ?? null, $ids))));
+        sort($resolved, SORT_NATURAL | SORT_FLAG_CASE);
+
+        return $resolved;
     }
 }

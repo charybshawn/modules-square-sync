@@ -234,8 +234,25 @@
           table-id="square-sync-catalog"
           item-key="square_object_id"
           mobile-row-style="flat"
+          :extra-filter-count="catalogCategory !== '' ? 1 : 0"
           @sort="sortCatalog"
+          @clear-filters="catalogCategory = ''"
         >
+          <template #filters-extra>
+            <div>
+              <label for="square-catalog-category" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Category</label>
+              <select
+                id="square-catalog-category"
+                v-model="catalogCategory"
+                class="w-full text-base sm:text-sm rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+              >
+                <option value="">Any</option>
+                <option v-for="category in catalogCategories" :key="category" :value="category">{{ category }}</option>
+                <option v-if="hasUncategorized" :value="UNCATEGORIZED">No category</option>
+              </select>
+            </div>
+          </template>
+
           <template #mobile-card="{ item }">
             <div class="space-y-2.5">
               <div class="flex items-start justify-between gap-3">
@@ -244,6 +261,7 @@
                   <p class="text-xs text-gray-500 dark:text-gray-400">
                     {{ item.sku ?? 'No SKU' }}<template v-if="item.price !== null"> · {{ formatPrice(item.price, item.currency) }}</template>
                   </p>
+                  <p v-if="item.category" class="text-xs text-gray-500 dark:text-gray-400">{{ item.category }}</p>
                 </div>
                 <CatalogBadges :archived="item.archived" :suggested="item.suggested_product_id !== null" />
               </div>
@@ -264,6 +282,10 @@
               <span class="text-sm font-medium text-gray-900 dark:text-white">{{ item.name }}</span>
               <CatalogBadges :archived="item.archived" :suggested="item.suggested_product_id !== null" />
             </div>
+          </template>
+
+          <template #cell-category="{ item }">
+            <span class="text-sm text-gray-500 dark:text-gray-400">{{ item.category || '—' }}</span>
           </template>
 
           <template #cell-sku="{ item }">
@@ -544,13 +566,15 @@ interface CatalogItemRow {
   price: number | null
   currency: string | null
   archived: boolean
+  categories: string[]
 }
 
 // A catalog item as the table shows it: the filterable columns (status,
 // match) are derived here, since DataTable filters on plain row fields.
 interface CatalogTableRow extends CatalogItemRow {
   status: 'Active' | 'Archived'
-  match: 'Suggested' | 'No match'
+  // Joined for display and so DataTable's search also matches categories.
+  category: string
   suggested_product_id: number | null
 }
 
@@ -874,7 +898,7 @@ const catalogRows = computed<CatalogTableRow[]>(() => (catalogItems.value ?? [])
   return {
     ...item,
     status: item.archived ? 'Archived' : 'Active',
-    match: suggestion ? 'Suggested' : 'No match',
+    category: item.categories.join(', '),
     suggested_product_id: suggestion?.id ?? null,
   }
 }))
@@ -891,18 +915,32 @@ const preselectSuggestions = () => {
 
 const catalogColumns: Column[] = [
   { key: 'name', label: 'Square item', sortable: true },
+  { key: 'category', label: 'Category', sortable: true, hideable: true },
   { key: 'sku', label: 'SKU', sortable: true, hideable: true },
-  { key: 'price', label: 'Price', sortable: true, hideable: true, filterable: true, filterType: 'numberRange' },
+  { key: 'price', label: 'Price', sortable: true, hideable: true },
   { key: 'status', label: 'Status', filterOnly: true, filterable: true, options: ['Active', 'Archived'] },
-  { key: 'match', label: 'Suggested match', filterOnly: true, filterable: true, options: ['Suggested', 'No match'] },
   { key: 'link', label: 'Local product' },
 ]
 
+// Category is the page's own filter (DataTable's filters-extra slot)
+// rather than a filterable column: an item can be in several categories,
+// and DataTable's select filter only matches one exact value.
+const catalogCategory = ref<string>('')
+
+const catalogCategories = computed(() => [...new Set((catalogItems.value ?? []).flatMap((item) => item.categories))]
+  .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })))
+
+const hasUncategorized = computed(() => (catalogItems.value ?? []).some((item) => item.categories.length === 0))
+
+// Sentinel for "items with no category" -- can't collide with a real
+// category name, which Square never leaves blank.
+const UNCATEGORIZED = '__none__'
+
 // DataTable leaves sorting to the page (it only emits which column).
-const catalogSort = ref<{ field: keyof CatalogItemRow; direction: 'asc' | 'desc' }>({ field: 'name', direction: 'asc' })
+const catalogSort = ref<{ field: keyof CatalogTableRow; direction: 'asc' | 'desc' }>({ field: 'name', direction: 'asc' })
 
 const sortCatalog = (field: string) => {
-  const key = field as keyof CatalogItemRow
+  const key = field as keyof CatalogTableRow
   catalogSort.value = catalogSort.value.field === key
     ? { field: key, direction: catalogSort.value.direction === 'asc' ? 'desc' : 'asc' }
     : { field: key, direction: 'asc' }
@@ -911,11 +949,16 @@ const sortCatalog = (field: string) => {
 const sortedCatalogRows = computed<CatalogTableRow[]>(() => {
   const { field, direction } = catalogSort.value
   const sign = direction === 'asc' ? 1 : -1
+  const category = catalogCategory.value
 
-  // Blanks (no SKU, variable price) always sort last.
-  return [...catalogRows.value].sort((a, b) => {
-    const left = a[field]
-    const right = b[field]
+  const rows = category === ''
+    ? catalogRows.value
+    : catalogRows.value.filter((row) => category === UNCATEGORIZED ? row.categories.length === 0 : row.categories.includes(category))
+
+  // Blanks (no SKU, no category, variable price) always sort last.
+  return [...rows].sort((a, b) => {
+    const left = a[field] === '' ? null : a[field]
+    const right = b[field] === '' ? null : b[field]
     if (left === null || left === undefined) return right === null || right === undefined ? 0 : 1
     if (right === null || right === undefined) return -1
     return typeof left === 'number' && typeof right === 'number'
