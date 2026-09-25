@@ -238,18 +238,22 @@
           @sort="sortCatalog"
           @clear-filters="catalogCategory = ''"
         >
+          <!-- The slot spans the drawer's full row; the same 1/2/3 grid the
+               drawer uses keeps Category the width of Status beside it. -->
           <template #filters-extra>
-            <div>
-              <label for="square-catalog-category" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Category</label>
-              <select
-                id="square-catalog-category"
-                v-model="catalogCategory"
-                class="w-full text-base sm:text-sm rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-              >
-                <option value="">Any</option>
-                <option v-for="category in catalogCategories" :key="category" :value="category">{{ category }}</option>
-                <option v-if="hasUncategorized" :value="UNCATEGORIZED">No category</option>
-              </select>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div>
+                <label for="square-catalog-category" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">Category</label>
+                <select
+                  id="square-catalog-category"
+                  v-model="catalogCategory"
+                  class="w-full text-base sm:text-sm rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                >
+                  <option value="">Any</option>
+                  <option v-for="category in catalogCategories" :key="category" :value="category">{{ category }}</option>
+                  <option v-if="hasUncategorized" :value="UNCATEGORIZED">No category</option>
+                </select>
+              </div>
             </div>
           </template>
 
