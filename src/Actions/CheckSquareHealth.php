@@ -9,8 +9,12 @@ use Cultpantry\SquareSync\Contracts\AuditLog;
 use Cultpantry\SquareSync\Square\SquareClient;
 use Cultpantry\SquareSync\Square\SquareException;
 use Illuminate\Support\Carbon;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Throwable;
+
+use function Illuminate\Support\defer;
 
 /**
  * The one answer to "is the Square sync working right now?", asked live
@@ -83,16 +87,23 @@ class CheckSquareHealth
     {
         // One check at a time -- two admins opening the page together, or
         // the schedule overlapping a page load, would otherwise both
-        // compare against the same previous snapshot and alert twice.
-        return Cache::lock('square-sync:health-check', 60)->block(30, function () use ($correlationId) {
-            $previous = $this->snapshot();
-            $health = $this->check();
+        // compare against the same previous snapshot and alert twice. A
+        // request that finds a check already running answers with the last
+        // result rather than queueing behind it: a page load must never
+        // hang on a slow Square.
+        try {
+            return Cache::lock('square-sync:health-check', 90)->block(10, function () use ($correlationId) {
+                $previous = $this->snapshot();
+                $health = $this->check();
 
-            $this->updateSetting->handle(self::SNAPSHOT_KEY, json_encode($health));
-            $this->reportChange($previous, $health, $correlationId);
+                $this->updateSetting->handle(self::SNAPSHOT_KEY, json_encode($health));
+                $this->reportChange($previous, $health, $correlationId);
 
-            return $health;
-        });
+                return $health;
+            });
+        } catch (LockTimeoutException) {
+            return $this->snapshot() ?? $this->check();
+        }
     }
 
     /**
@@ -279,12 +290,7 @@ class CheckSquareHealth
                 correlationId: $correlationId,
             );
 
-            $this->alerts->send(
-                $health['status'] === 'online' ? 'Square sync needs attention' : 'Square sync is offline',
-                $lines,
-                'warning',
-                $url,
-            );
+            $this->alert($health['status'] === 'online' ? 'Square sync needs attention' : 'Square sync is offline', $lines, 'warning', $url);
 
             return;
         }
@@ -298,7 +304,24 @@ class CheckSquareHealth
                 correlationId: $correlationId,
             );
 
-            $this->alerts->send('Square sync is healthy again', array_values($before), 'info', $url);
+            $this->alert('Square sync is healthy again', array_values($before), 'info', $url);
         }
+    }
+
+    /**
+     * Sent once the response (or command) has finished, and never allowed
+     * to fail the check: the alert usually means email, and a slow or
+     * broken mail server must not turn "is Square working?" into a hung
+     * page. The change is already in the audit trail either way.
+     */
+    private function alert(string $title, array $lines, string $level, string $url): void
+    {
+        defer(function () use ($title, $lines, $level, $url) {
+            try {
+                $this->alerts->send($title, $lines, $level, $url);
+            } catch (Throwable $e) {
+                Log::warning('Square sync alert could not be sent', ['title' => $title, 'exception' => $e->getMessage()]);
+            }
+        });
     }
 }

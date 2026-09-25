@@ -128,7 +128,7 @@ const tokenOk = computed(() => props.connection.access_token_configured
   && !problems.value.some((problem) => problem.key === 'token_invalid' || problem.key === 'token_missing'))
 
 const badge = computed(() => {
-  if (props.checking && !props.health) {
+  if (props.checking) {
     return { label: 'Checking…', class: 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200', dot: 'bg-gray-400' }
   }
 

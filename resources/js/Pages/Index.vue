@@ -501,7 +501,7 @@ import CatalogLinkControl from './Shared/CatalogLinkControl.vue'
 import SeverityBadge from './Shared/SeverityBadge.vue'
 import ConnectionPanel from './Shared/ConnectionPanel.vue'
 import DiagnosticsPanel from './Shared/DiagnosticsPanel.vue'
-import { formatTimestamp, type ConnectionConfig, type Health, type LinkIssue, type TestSaleRun } from './Shared/types'
+import { formatTimestamp, requestError, REQUEST_TIMEOUT_MS, type ConnectionConfig, type Health, type LinkIssue, type TestSaleRun } from './Shared/types'
 
 defineOptions({ layout: (h: any, page: any) => h(AdminLayout, { hideBreadcrumbOnMobile: true }, () => page) })
 
@@ -643,10 +643,10 @@ const checkHealth = async () => {
   healthChecking.value = true
   healthError.value = null
   try {
-    const response = await axios.post(route('admin.square.health'))
+    const response = await axios.post(route('admin.square.health'), {}, { timeout: REQUEST_TIMEOUT_MS })
     applyHealth(response.data)
   } catch (error: any) {
-    healthError.value = error?.response?.data?.error ?? error?.response?.data?.message ?? 'Square didn\'t respond. Try again in a moment.'
+    healthError.value = requestError(error, 'The connection check')
   } finally {
     healthChecking.value = false
   }
@@ -667,11 +667,10 @@ const TONES: Record<StatTone, string> = {
   danger: 'text-red-600 dark:text-red-400',
 }
 
-const CONNECTION_LABELS: Record<Health['status'] | 'unknown', string> = {
+const CONNECTION_LABELS: Record<Health['status'], string> = {
   online: 'Online',
   offline: 'Offline',
   not_configured: 'Not set up',
-  unknown: 'Checking…',
 }
 
 const heroHeadline = computed<HeroStat>(() => ({
@@ -698,7 +697,7 @@ const heroStats = computed<HeroStat[]>(() => [
   { label: 'Stock changes from Square', value: props.summary.stock_changes_applied, hint: 'Last 30 days' },
   {
     label: 'Connection',
-    value: CONNECTION_LABELS[liveHealth.value?.status ?? 'unknown'],
+    value: liveHealth.value ? CONNECTION_LABELS[liveHealth.value.status] : healthChecking.value ? 'Checking…' : 'Unknown',
     tone: liveHealth.value?.status === 'online' ? 'good' : liveHealth.value ? 'danger' : 'default',
     hint: props.connection.environment === 'production' ? 'Production' : 'Sandbox',
   },
@@ -843,11 +842,11 @@ const runSyncCheck = async () => {
   showSyncResultModal.value = true
 
   try {
-    const response = await axios.post(route('admin.square.sync'))
+    const response = await axios.post(route('admin.square.sync'), {}, { timeout: REQUEST_TIMEOUT_MS * 2 })
     syncResult.value = response.data
     liveHealth.value = response.data.health
   } catch (error: any) {
-    syncResultError.value = error?.response?.data?.error ?? 'Square didn\'t respond.'
+    syncResultError.value = requestError(error, 'The sync check')
   } finally {
     syncChecking.value = false
   }

@@ -101,3 +101,19 @@ export const timeAgo = (value: string | null): string => {
   if (hours < 24) return `${hours} h ago`
   return formatTimestamp(value)
 }
+
+// A failed request as something an admin can act on: the app's own error
+// when it sent one, otherwise what actually happened (a timeout, a gateway
+// error) rather than a vague "didn't respond".
+export const requestError = (error: any, action: string): string => {
+  const data = error?.response?.data
+  if (typeof data?.error === 'string') return data.error
+  if (typeof data?.message === 'string' && data.message !== '') return `${action} failed: ${data.message}`
+  if (error?.code === 'ECONNABORTED') return `${action} timed out. Square may be slow -- try again in a moment.`
+  const status = error?.response?.status
+  return status ? `${action} failed (HTTP ${status}). Try again in a moment.` : `${action} failed -- the server couldn't be reached.`
+}
+
+// Long enough for a slow Square, short enough that a stuck request
+// doesn't leave a panel spinning forever.
+export const REQUEST_TIMEOUT_MS = 60000

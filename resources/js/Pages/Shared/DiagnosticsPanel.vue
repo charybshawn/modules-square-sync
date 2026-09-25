@@ -119,7 +119,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import axios from 'axios'
 import AdminAlert from '@/Components/Admin/AdminAlert.vue'
 import StepIcon from './StepIcon.vue'
-import { timeAgo, type Diagnostics, type Health, type TestSaleRun } from './types'
+import { requestError, REQUEST_TIMEOUT_MS, timeAgo, type Diagnostics, type Health, type TestSaleRun } from './types'
 
 interface Props {
   environment: string
@@ -144,11 +144,11 @@ const runChecks = async () => {
   running.value = true
   error.value = null
   try {
-    const response = await axios.post(route('admin.square.diagnostics'))
+    const response = await axios.post(route('admin.square.diagnostics'), {}, { timeout: REQUEST_TIMEOUT_MS * 2 })
     diagnostics.value = response.data
     emit('health', response.data.health)
   } catch (err: any) {
-    error.value = err?.response?.data?.error ?? err?.response?.data?.message ?? 'Square didn\'t respond. Try again in a moment.'
+    error.value = requestError(err, 'The checks')
   } finally {
     running.value = false
   }
@@ -198,7 +198,7 @@ const poll = async () => {
     const response = await axios.post(route('admin.square.test-sale.check', run.value.id))
     settle(response.data)
   } catch (err: any) {
-    testError.value = err?.response?.data?.error ?? 'Lost track of the test sale.'
+    testError.value = requestError(err, 'Checking the test sale')
     stopPolling()
   }
 }
@@ -212,7 +212,7 @@ const startTestSale = async () => {
     run.value = null
     settle(response.data)
   } catch (err: any) {
-    testError.value = err?.response?.data?.error ?? err?.response?.data?.message ?? 'Couldn\'t start the test sale.'
+    testError.value = requestError(err, 'Starting the test sale')
   } finally {
     starting.value = false
   }
@@ -225,7 +225,7 @@ const pullNow = async () => {
     const response = await axios.post(route('admin.square.test-sale.pull', run.value.id))
     settle(response.data)
   } catch (err: any) {
-    testError.value = err?.response?.data?.error ?? 'The pull from Square failed.'
+    testError.value = requestError(err, 'The pull from Square')
   } finally {
     pulling.value = false
   }
