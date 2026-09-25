@@ -24,12 +24,18 @@ final class WebhooksApi
      * Has Square send a sample event of $eventType to the subscription's
      * notification URL, and reports the HTTP status this app answered with.
      *
-     * @return array{status_code?: int, payload?: string}
+     * The docs wrap the result in subscription_test_result, with payload as
+     * a JSON string; Square actually answers unwrapped, with payload as an
+     * object. Both are accepted.
+     *
+     * @return array{status_code?: int, payload?: array<string, mixed>|string}
      */
     public function testSubscription(string $subscriptionId, string $eventType): array
     {
-        return $this->client->request('POST', '/v2/webhooks/subscriptions/'.rawurlencode($subscriptionId).'/test', [
+        $response = $this->client->request('POST', '/v2/webhooks/subscriptions/'.rawurlencode($subscriptionId).'/test', [
             'event_type' => $eventType,
-        ])->json('subscription_test_result') ?? [];
+        ]);
+
+        return $response->json('subscription_test_result') ?? $response->json() ?? [];
     }
 }

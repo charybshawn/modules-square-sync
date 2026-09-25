@@ -284,7 +284,8 @@ class RunSquareDiagnostics
         // app's answer -- but the event may still have arrived and been
         // handled, which is what actually matters.
         if ($status === 0) {
-            $eventId = json_decode((string) ($result['payload'] ?? ''), true)['event_id'] ?? null;
+            $payload = $result['payload'] ?? null;
+            $eventId = (is_string($payload) ? json_decode($payload, true) : $payload)['event_id'] ?? null;
             $received = $eventId !== null ? SquareWebhookEvent::query()->where('square_event_id', $eventId)->first() : null;
 
             if ($received !== null) {
