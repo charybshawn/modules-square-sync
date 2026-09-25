@@ -2,6 +2,7 @@
 
 namespace Cultpantry\SquareSync\Square;
 
+use Cultpantry\SquareSync\Actions\ResetOnEnvironmentChange;
 use Cultpantry\SquareSync\Contracts\AuditLog;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
@@ -76,6 +77,11 @@ final class SquareClient
      */
     public function request(string $method, string $path, array $payload = [], ?string $correlationId = null): SquareResponse
     {
+        // Every Square call goes through here, so this is where a switch
+        // between sandbox and production is noticed before any stored id
+        // from the other environment gets sent.
+        app(ResetOnEnvironmentChange::class)->handle();
+
         // Falls through to the host app's ambient trace id (set once per
         // request/queued job by App\Http\Middleware\ResolveTraceContext)
         // before minting a disconnected one -- this is what lets an

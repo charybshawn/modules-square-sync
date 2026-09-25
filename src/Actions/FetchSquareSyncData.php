@@ -35,6 +35,7 @@ class FetchSquareSyncData
         private readonly FetchSquareLocations $fetchLocations,
         private readonly LocalCatalog $catalog,
         private readonly AuditLog $auditLog,
+        private readonly ResetOnEnvironmentChange $resetOnEnvironmentChange,
     ) {}
 
     /**
@@ -49,6 +50,10 @@ class FetchSquareSyncData
      */
     public function handle(): array
     {
+        // So the page never lists links left over from the other Square
+        // environment (see ResetOnEnvironmentChange).
+        $this->resetOnEnvironmentChange->handle();
+
         return [
             'connection' => $this->connectionStatus(),
             'mappings' => $this->mappings(),

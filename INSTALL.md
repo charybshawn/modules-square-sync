@@ -126,3 +126,10 @@ raw body, so any mismatch fails every signature check.
   `square.manual_change_overridden` event is logged.
 - **Drift is fixed in one direction.** `square:reconcile --fix` and the admin
   page's per-row resolve push local counts to Square.
+- **Switching between sandbox and production resets the sync.** They're
+  separate Square accounts, so the first request after `SQUARE_ENVIRONMENT`
+  changes does four things: it unlinks every product, clears the in-app sync
+  location, restarts the catalog, inventory and sales watermarks at the time
+  of the switch, and logs `square.environment_changed`. After that, relink
+  products against the new account. Sales recorded from the sandbox are
+  tagged `environment: sandbox`.

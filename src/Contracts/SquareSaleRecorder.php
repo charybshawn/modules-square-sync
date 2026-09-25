@@ -16,6 +16,10 @@ use Cultpantry\SquareSync\Contracts\Sales\SquareSale;
  * sale off twice -- and sales imported by square:import-sales happened
  * before this sync existed and are already reflected in stock.
  *
+ * Sales made while connected to Square's sandbox arrive with
+ * $environment 'sandbox'. They're test data: keep them apart from real
+ * sales, and don't attribute them to real customers.
+ *
  * Exactly-once is this package's job (it claims each Square id before
  * calling in, inside the same transaction), but implementations should
  * still key their records on the Square ids so a manual replay is

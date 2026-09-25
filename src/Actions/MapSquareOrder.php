@@ -88,6 +88,7 @@ class MapSquareOrder
             customer: $this->customer($order, $customers),
             lines: $lines,
             raw: $order,
+            environment: $this->environment(),
         );
     }
 
@@ -138,7 +139,15 @@ class MapSquareOrder
             reason: $refund['reason'] ?? null,
             lines: $lines,
             raw: $order,
+            environment: $this->environment(),
         );
+    }
+
+    private function environment(): string
+    {
+        return config('square-sync.environment') === SquareSale::ENV_PRODUCTION
+            ? SquareSale::ENV_PRODUCTION
+            : SquareSale::ENV_SANDBOX;
     }
 
     /**

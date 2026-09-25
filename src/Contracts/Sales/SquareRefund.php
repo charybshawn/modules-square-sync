@@ -13,6 +13,10 @@ use Carbon\CarbonImmutable;
  */
 final class SquareRefund
 {
+    public const ENV_SANDBOX = SquareSale::ENV_SANDBOX;
+
+    public const ENV_PRODUCTION = SquareSale::ENV_PRODUCTION;
+
     /**
      * @param  array<int, SquareRefundLine>  $lines
      * @param  array<string, mixed>  $raw
@@ -26,5 +30,8 @@ final class SquareRefund
         public readonly ?string $reason,
         public readonly array $lines,
         public readonly array $raw,
+        // 'sandbox' or 'production' -- sandbox sales are test data, which
+        // a host should keep apart from real sales.
+        public readonly string $environment = self::ENV_PRODUCTION,
     ) {}
 }

@@ -11,6 +11,10 @@ use Carbon\CarbonImmutable;
  */
 final class SquareSale
 {
+    public const ENV_SANDBOX = 'sandbox';
+
+    public const ENV_PRODUCTION = 'production';
+
     public const CHANNEL_POS = 'pos';
 
     public const CHANNEL_INVOICE = 'invoice';
@@ -45,5 +49,8 @@ final class SquareSale
         public readonly ?SquareCustomer $customer,
         public readonly array $lines,
         public readonly array $raw,
+        // 'sandbox' or 'production' -- sandbox sales are test data, which
+        // a host should keep apart from real sales.
+        public readonly string $environment = self::ENV_PRODUCTION,
     ) {}
 }
