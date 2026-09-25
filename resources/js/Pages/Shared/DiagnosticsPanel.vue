@@ -7,14 +7,20 @@
           Checks every step a Square sale takes to reach local stock. Nothing here changes stock or your Square catalog.
         </p>
       </div>
-      <button
-        type="button"
-        :disabled="running"
-        class="tap-target-touch shrink-0 inline-flex items-center px-3 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
-        @click="runChecks"
-      >
-        {{ running ? 'Checking…' : diagnostics ? 'Run Again' : 'Run Checks' }}
-      </button>
+      <div class="shrink-0 flex flex-col items-end gap-2">
+        <button
+          type="button"
+          :disabled="running"
+          class="tap-target-touch inline-flex items-center px-3 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+          @click="runChecks"
+        >
+          {{ running ? 'Checking…' : diagnostics ? 'Run Again' : 'Run Checks' }}
+        </button>
+        <label class="inline-flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
+          <input v-model="debug" type="checkbox" :disabled="running" class="rounded border-gray-300 dark:border-gray-600 text-indigo-600 focus:ring-indigo-500" />
+          Show raw responses
+        </label>
+      </div>
     </div>
 
     <div v-if="error" class="px-4 md:px-6 pb-4">
@@ -30,7 +36,23 @@
         </div>
       </li>
     </ol>
-    <p v-else-if="!running" class="px-4 md:px-6 pb-5 text-sm text-gray-500 dark:text-gray-400">
+
+    <!-- Debug: the run's raw Square calls and received webhooks, as one copyable block. -->
+    <div v-if="diagnostics?.debug" class="border-t border-gray-100 dark:border-gray-700 px-4 md:px-6 py-3">
+      <div class="flex items-center justify-between gap-2">
+        <p class="text-sm font-medium text-gray-900 dark:text-white">Raw responses</p>
+        <button
+          type="button"
+          class="tap-target-touch inline-flex items-center px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700"
+          @click="copyDebug"
+        >
+          {{ copied ? 'Copied' : 'Copy' }}
+        </button>
+      </div>
+      <pre class="mt-2 max-h-96 overflow-auto rounded-md bg-gray-50 dark:bg-gray-900 p-3 text-xs text-gray-800 dark:text-gray-200 whitespace-pre">{{ debugText }}</pre>
+    </div>
+
+    <p v-if="!diagnostics && !running" class="px-4 md:px-6 pb-5 text-sm text-gray-500 dark:text-gray-400">
       Includes a live webhook delivery test: Square sends this app a sample event and reports whether it was accepted.
     </p>
 
@@ -140,11 +162,35 @@ const diagnostics = ref<Diagnostics | null>(null)
 const running = ref(false)
 const error = ref<string | null>(null)
 
+const debug = ref(false)
+const copied = ref(false)
+
+// The checks ride along so a pasted dump explains itself.
+const debugText = computed(() =>
+  diagnostics.value?.debug ? JSON.stringify({ checks: diagnostics.value.checks, ...diagnostics.value.debug }, null, 2) : '',
+)
+
+const copyDebug = async () => {
+  try {
+    await navigator.clipboard.writeText(debugText.value)
+  } catch {
+    // Clipboard API needs a secure context; fall back to a hidden textarea.
+    const textarea = document.createElement('textarea')
+    textarea.value = debugText.value
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    textarea.remove()
+  }
+  copied.value = true
+  setTimeout(() => (copied.value = false), 2000)
+}
+
 const runChecks = async () => {
   running.value = true
   error.value = null
   try {
-    const response = await axios.post(route('admin.square.diagnostics'), {}, { timeout: REQUEST_TIMEOUT_MS * 2 })
+    const response = await axios.post(route('admin.square.diagnostics'), { debug: debug.value }, { timeout: REQUEST_TIMEOUT_MS * 2 })
     diagnostics.value = response.data
     emit('health', response.data.health)
   } catch (err: any) {

@@ -19,6 +19,7 @@ use Cultpantry\SquareSync\Contracts\Null\NullSquareSaleRecorder;
 use Cultpantry\SquareSync\Contracts\SquareSaleRecorder;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Cultpantry\SquareSync\Policies\SquareObjectMappingPolicy;
+use Cultpantry\SquareSync\Square\SquareCallRecorder;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\ServiceProvider;
@@ -36,6 +37,8 @@ class SquareSyncServiceProvider extends ServiceProvider
         // contracts. bindIf() so the host's own integration provider wins
         // regardless of provider order; the null defaults just mean an
         // unintegrated host gets a module that boots and syncs nothing.
+        $this->app->scoped(SquareCallRecorder::class);
+
         $this->app->bindIf(LocalCatalog::class, NullLocalCatalog::class);
         $this->app->bindIf(LocalInventory::class, NullLocalInventory::class);
         $this->app->bindIf(AuditLog::class, NullAuditLog::class);

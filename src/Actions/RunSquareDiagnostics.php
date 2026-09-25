@@ -8,6 +8,7 @@ use Cultpantry\SquareSync\Models\SquareImportedSale;
 use Cultpantry\SquareSync\Models\SquareInventoryChange;
 use Cultpantry\SquareSync\Models\SquareObjectMapping;
 use Cultpantry\SquareSync\Models\SquareWebhookEvent;
+use Cultpantry\SquareSync\Square\SquareCallRecorder;
 use Cultpantry\SquareSync\Square\SquareClient;
 use Illuminate\Support\Carbon;
 use Throwable;
@@ -42,13 +43,24 @@ class RunSquareDiagnostics
         private readonly SquareClient $client,
         private readonly LocalCatalog $catalog,
         private readonly GetSiteSetting $getSetting,
+        private readonly SquareCallRecorder $recorder,
     ) {}
 
     /**
-     * @return array{health: array, checks: array<int, array{key: string, label: string, status: 'pass'|'warn'|'fail'|'skip', detail: string}>, test_sale: array}
+     * With $debug, the result also carries every raw Square request and
+     * response the run made, and every webhook that arrived meanwhile --
+     * the delivery test's own event among them.
+     *
+     * @return array{health: array, checks: array<int, array{key: string, label: string, status: 'pass'|'warn'|'fail'|'skip', detail: string}>, test_sale: array, debug?: array}
      */
-    public function handle(): array
+    public function handle(bool $debug = false): array
     {
+        $startedAt = now();
+
+        if ($debug) {
+            $this->recorder->start();
+        }
+
         $health = $this->checkHealth->handle();
         $online = $health['status'] === 'online';
 
@@ -73,10 +85,46 @@ class RunSquareDiagnostics
 
         $checks[] = $this->activityCheck();
 
-        return [
+        $result = [
             'health' => $health,
             'checks' => $checks,
             'test_sale' => $this->testSaleAvailability($health),
+        ];
+
+        return $debug ? [...$result, 'debug' => $this->debugTrace($startedAt)] : $result;
+    }
+
+    /**
+     * @return array{started_at: string, finished_at: string, config: array, square_calls: array, webhooks_received: array}
+     */
+    private function debugTrace(Carbon $startedAt): array
+    {
+        return [
+            'started_at' => $startedAt->toIso8601String(),
+            'finished_at' => now()->toIso8601String(),
+            'config' => [
+                'environment' => config('square-sync.environment'),
+                'api_version' => config('square-sync.version'),
+                'notification_url' => config('square-sync.notification_url'),
+                'webhook_signature_key_set' => filled(config('square-sync.webhook_signature_key')),
+                'timeout_seconds' => config('square-sync.timeout'),
+            ],
+            'square_calls' => $this->recorder->stop(),
+            'webhooks_received' => SquareWebhookEvent::query()
+                ->where('created_at', '>=', $startedAt)
+                ->oldest('id')
+                ->get()
+                ->map(fn (SquareWebhookEvent $event) => [
+                    'square_event_id' => $event->square_event_id,
+                    'event_type' => $event->event_type,
+                    'status' => $event->status,
+                    'error' => $event->error,
+                    'received_at' => $event->created_at?->toIso8601String(),
+                    'processed_at' => $event->processed_at?->toIso8601String(),
+                    'handling_ms' => $event->processed_at && $event->created_at ? (int) $event->created_at->diffInMilliseconds($event->processed_at) : null,
+                    'payload' => $event->payload,
+                ])
+                ->all(),
         ];
     }
 
@@ -179,6 +227,11 @@ class RunSquareDiagnostics
     private function subscriptionCheck(): array
     {
         $label = 'Webhook subscription on Square';
+        $url = rtrim((string) config('square-sync.notification_url'), '/');
+
+        if ($url === '') {
+            return [null, $this->skip('webhook_subscription', $label, 'Needs SQUARE_NOTIFICATION_URL.')];
+        }
 
         try {
             $subscriptions = $this->client->webhooks()->listSubscriptions();
@@ -186,8 +239,7 @@ class RunSquareDiagnostics
             return [null, $this->result('webhook_subscription', $label, 'warn', "Couldn't read subscriptions ({$e->getMessage()}). They can only be read with the application's personal access token -- check them in the Square Developer Console.")];
         }
 
-        $url = rtrim((string) config('square-sync.notification_url'), '/');
-        $subscription = collect($subscriptions)->first(fn (array $candidate) => rtrim($candidate['notification_url'] ?? '', '/') === $url);
+        $subscription =collect($subscriptions)->first(fn (array $candidate) => rtrim($candidate['notification_url'] ?? '', '/') === $url);
 
         if ($subscription === null) {
             return [null, $this->result('webhook_subscription', $label, 'fail', "No subscription on this Square application sends to {$url}. Add one in the Square Developer Console ({$this->environmentLabel()}).")];
@@ -227,6 +279,18 @@ class RunSquareDiagnostics
         }
 
         $status = (int) ($result['status_code'] ?? 0);
+
+        // Square leaves the status out when it gave up waiting for this
+        // app's answer -- but the event may still have arrived and been
+        // handled, which is what actually matters.
+        if ($status === 0) {
+            $eventId = json_decode((string) ($result['payload'] ?? ''), true)['event_id'] ?? null;
+            $received = $eventId !== null ? SquareWebhookEvent::query()->where('square_event_id', $eventId)->first() : null;
+
+            if ($received !== null) {
+                return $this->result('webhook_delivery', $label, 'pass', "Square's test inventory.count.updated event reached this app and was {$received->status}. Square didn't record the app's answer -- it most likely took longer than Square waits.");
+            }
+        }
 
         return match (true) {
             $status >= 200 && $status < 300 => $this->result('webhook_delivery', $label, 'pass', "Square sent a test inventory.count.updated event and this app accepted it ({$status})."),

@@ -119,11 +119,11 @@ class SquareSyncController extends Controller implements HasMiddleware
     /**
      * The Diagnostics panel's "Run checks" -- see RunSquareDiagnostics.
      */
-    public function diagnostics(RunSquareDiagnostics $runSquareDiagnostics): JsonResponse
+    public function diagnostics(Request $request, RunSquareDiagnostics $runSquareDiagnostics): JsonResponse
     {
         $this->authorize('sync', new SquareObjectMapping);
 
-        return response()->json($runSquareDiagnostics->handle());
+        return response()->json($runSquareDiagnostics->handle(debug: $request->boolean('debug')));
     }
 
     /**

@@ -123,6 +123,8 @@ final class SquareClient
             correlationId: $correlationId,
         );
 
+        $startedAt = microtime(true);
+
         $response = Http::withToken(config('square-sync.access_token'))
             ->withHeaders(['Square-Version' => config('square-sync.version')])
             ->baseUrl(config('square-sync.base_url'))
@@ -139,6 +141,15 @@ final class SquareClient
             ->send($method, $path, $this->requestOptions($method, $payload));
 
         $squareResponse = new SquareResponse($response);
+
+        app(SquareCallRecorder::class)->record($this->redact([
+            'method' => $method,
+            'path' => $path,
+            'payload' => $payload,
+            'status' => $response->status(),
+            'duration_ms' => (int) round((microtime(true) - $startedAt) * 1000),
+            'body' => $this->loggableBody($response, $path),
+        ]));
 
         if ($squareResponse->ok()) {
             $this->auditLog->record(

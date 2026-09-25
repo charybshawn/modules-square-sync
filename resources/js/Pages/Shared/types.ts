@@ -65,6 +65,8 @@ export interface Diagnostics {
   health: Health
   checks: DiagnosticCheck[]
   test_sale: { available: boolean; reason: string | null; products: TestSaleProduct[] }
+  /** Only when run with "Show raw responses": every Square call and webhook of the run. */
+  debug?: Record<string, unknown>
 }
 
 export interface TestSaleStep {
