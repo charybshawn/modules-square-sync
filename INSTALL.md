@@ -84,7 +84,9 @@ Webhook subscriptions (Square Developer Console):
   inventory within seconds, instead of at the next scheduled pull.
 
 Schedule `square:pull-sales` (e.g. every 15 minutes) as a catch-up for any
-missed webhook, and optionally `square:reconcile` for a drift report.
+missed webhook, `square:verify-links` (e.g. hourly) to catch product links
+whose Square item was deleted, archived, or taken off the sync location, and
+optionally `square:reconcile` for a drift report.
 
 ## 7. Backfill past Square sales (once)
 
@@ -133,3 +135,8 @@ raw body, so any mismatch fails every signature check.
   of the switch, and logs `square.environment_changed`. After that, relink
   products against the new account. Sales recorded from the sandbox are
   tagged `environment: sandbox`.
+- **Stale links are flagged, never removed.** `square:verify-links`, which
+  also runs as part of the admin page's Run Sync Check, looks up every linked
+  Square item and marks each link OK, Missing, Archived or Not at location.
+  Missing links stop syncing until they're unlinked or relinked. A link whose
+  item comes back is live again on the next check.

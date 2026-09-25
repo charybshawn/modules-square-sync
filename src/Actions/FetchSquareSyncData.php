@@ -48,7 +48,7 @@ class FetchSquareSyncData
      *     summary: array,
      * }
      */
-    public function handle(): array
+    public function handle(bool $onlyNeedingAttention = false): array
     {
         // So the page never lists links left over from the other Square
         // environment (see ResetOnEnvironmentChange).
@@ -56,7 +56,8 @@ class FetchSquareSyncData
 
         return [
             'connection' => $this->connectionStatus(),
-            'mappings' => $this->mappings(),
+            'mappings' => $this->mappings($onlyNeedingAttention),
+            'onlyNeedingAttention' => $onlyNeedingAttention,
             'unmappedProducts' => $this->unmappedProducts(),
             'driftEvents' => $this->driftEvents(),
             'recentActivity' => $this->recentActivity(),
@@ -69,7 +70,7 @@ class FetchSquareSyncData
      * own ledgers -- what the sync has actually done lately, without
      * reaching into the host's orders.
      *
-     * @return array{sales_recorded: int, refunds_recorded: int, stock_changes_applied: int, last_sale_at: string|null}
+     * @return array{sales_recorded: int, refunds_recorded: int, stock_changes_applied: int, last_sale_at: string|null, links_needing_attention: int, links_verified_at: string|null}
      */
     private function summary(): array
     {
@@ -81,6 +82,10 @@ class FetchSquareSyncData
             'refunds_recorded' => SquareImportedSale::where('kind', 'refund')->where('created_at', '>=', $since)->count(),
             'stock_changes_applied' => SquareInventoryChange::where('created_at', '>=', $since)->count(),
             'last_sale_at' => $lastSaleAt !== null ? Carbon::parse($lastSaleAt)->toIso8601String() : null,
+            'links_needing_attention' => SquareObjectMapping::needsAttention()->count(),
+            'links_verified_at' => ($verifiedAt = SquareObjectMapping::max('verified_at')) !== null
+                ? Carbon::parse($verifiedAt)->toIso8601String()
+                : null,
         ];
     }
 
@@ -120,9 +125,10 @@ class FetchSquareSyncData
      * title/sku instead of the item's last-known name. One findMany() for
      * the whole page rather than a lookup per row.
      */
-    private function mappings(): AnonymousResourceCollection
+    private function mappings(bool $onlyNeedingAttention): AnonymousResourceCollection
     {
         $paginator = SquareObjectMapping::query()
+            ->when($onlyNeedingAttention, fn ($query) => $query->needsAttention())
             ->orderByDesc('id')
             ->paginate(self::MAPPINGS_PER_PAGE)
             ->withQueryString();

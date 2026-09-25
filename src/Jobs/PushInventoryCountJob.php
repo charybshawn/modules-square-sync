@@ -45,7 +45,7 @@ class PushInventoryCountJob implements ShouldQueue
 
     public function handle(SquareClient $client, AuditLog $auditLog, GetSquareLocationId $getLocationId): void
     {
-        $mapping = SquareObjectMapping::forItem($this->productId)->first();
+        $mapping = SquareObjectMapping::forItem($this->productId)->syncable()->first();
 
         // The mapping may have been unlinked between dispatch and
         // execution (e.g. the product was soft-deleted and archived on

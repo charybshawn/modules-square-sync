@@ -12,6 +12,7 @@ use Cultpantry\SquareSync\Actions\FetchUnlinkedSquareCatalogItems;
 use Cultpantry\SquareSync\Actions\GetSquareLocationId;
 use Cultpantry\SquareSync\Actions\ReconcileInventoryDrift;
 use Cultpantry\SquareSync\Actions\ResolveSquareInventoryDrift;
+use Cultpantry\SquareSync\Actions\VerifySquareLinks;
 use Cultpantry\SquareSync\Contracts\AuditLog;
 use Cultpantry\SquareSync\Contracts\LocalCatalog;
 use Cultpantry\SquareSync\Contracts\LocalInventory;
@@ -48,11 +49,13 @@ class SquareSyncController extends Controller implements HasMiddleware
         ];
     }
 
-    public function index(FetchSquareSyncData $fetchSquareSyncData): Response
+    public function index(Request $request, FetchSquareSyncData $fetchSquareSyncData): Response
     {
         $this->authorize('viewAny', SquareObjectMapping::class);
 
-        return Inertia::render('Vendor/square-sync/Index', $fetchSquareSyncData->handle());
+        return Inertia::render('Vendor/square-sync/Index', $fetchSquareSyncData->handle(
+            onlyNeedingAttention: $request->query('links') === 'attention',
+        ));
     }
 
     /**
@@ -81,7 +84,7 @@ class SquareSyncController extends Controller implements HasMiddleware
      * default -- no fix -- matching the command's own safe default. See
      * resolveDrift() below for how a drifted row actually gets corrected.
      */
-    public function sync(ReconcileInventoryDrift $reconcileInventoryDrift): JsonResponse
+    public function sync(VerifySquareLinks $verifySquareLinks, ReconcileInventoryDrift $reconcileInventoryDrift): JsonResponse
     {
         // A fresh, unpersisted instance: the 'sync' ability doesn't
         // inspect the model at all (SquareObjectMappingPolicy::sync()
@@ -93,7 +96,14 @@ class SquareSyncController extends Controller implements HasMiddleware
         $this->authorize('sync', new SquareObjectMapping);
 
         try {
-            return response()->json($reconcileInventoryDrift->handle(fix: false));
+            // Links first, so drift is only compared for links that still
+            // point at something real (orphaned ones drop out of it).
+            $links = $verifySquareLinks->handle();
+
+            return response()->json([
+                ...$reconcileInventoryDrift->handle(fix: false),
+                'links' => $links,
+            ]);
         } catch (Throwable $e) {
             return response()->json(['error' => "Square request failed: {$e->getMessage()}"], 502);
         }
@@ -245,6 +255,13 @@ class SquareSyncController extends Controller implements HasMiddleware
         ]);
 
         $product = $this->findItemOrFail($catalog, $validated['product_id']);
+
+        // One link per product: relinking replaces whatever it pointed at
+        // before (typically a stale link VerifySquareLinks flagged).
+        SquareObjectMapping::forItem($product->id)
+            ->where('square_object_id', '!=', $validated['square_object_id'])
+            ->get()
+            ->each(fn (SquareObjectMapping $old) => $old->unlink());
 
         SquareObjectMapping::linkTo(
             $product->id,

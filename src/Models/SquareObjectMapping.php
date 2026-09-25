@@ -47,12 +47,23 @@ use Illuminate\Support\Facades\Log;
  * @property Carbon|null $last_pulled_at
  * @property string|null $last_pushed_hash
  * @property string $sync_status
+ * @property string|null $verification_status
+ * @property Carbon|null $verified_at
  */
 class SquareObjectMapping extends Model
 {
     use HasFactory, SoftDeletes;
 
     public const SYNC_STATUSES = ['linked', 'pending', 'conflict', 'orphaned'];
+
+    /**
+     * What VerifySquareLinks last found for this link. Only 'missing' stops
+     * the link syncing (sync_status becomes 'orphaned'); the other two are
+     * warnings -- the item still exists and can be fixed on Square.
+     */
+    public const VERIFICATION_STATUSES = ['ok', 'missing', 'archived', 'not_at_location'];
+
+    public const NEEDS_ATTENTION = ['missing', 'archived', 'not_at_location'];
 
     protected $table = 'square_object_mappings';
 
@@ -67,12 +78,15 @@ class SquareObjectMapping extends Model
         'last_pulled_at',
         'last_pushed_hash',
         'sync_status',
+        'verification_status',
+        'verified_at',
     ];
 
     protected $casts = [
         'square_version' => 'integer',
         'last_pushed_at' => 'datetime',
         'last_pulled_at' => 'datetime',
+        'verified_at' => 'datetime',
     ];
 
     /**
@@ -145,6 +159,22 @@ class SquareObjectMapping extends Model
     public function scopeConflicted(Builder $query): Builder
     {
         return $query->where('sync_status', 'conflict');
+    }
+
+    /**
+     * Links it's safe to push to. An orphaned link's Square object no
+     * longer exists on this account (see VerifySquareLinks), so sending
+     * it anything would fail -- or, for a catalog push, create a
+     * duplicate item.
+     */
+    public function scopeSyncable(Builder $query): Builder
+    {
+        return $query->where('sync_status', '!=', 'orphaned');
+    }
+
+    public function scopeNeedsAttention(Builder $query): Builder
+    {
+        return $query->whereIn('verification_status', self::NEEDS_ATTENTION);
     }
 
     public function scopeOrphaned(Builder $query): Builder
@@ -221,6 +251,8 @@ class SquareObjectMapping extends Model
             'square_parent_object_id' => $parentId,
             'square_object_type' => $type,
             'sync_status' => 'linked',
+            'verification_status' => null,
+            'verified_at' => null,
         ]);
 
         if ($mapping->trashed()) {

@@ -36,6 +36,37 @@ final class CatalogApi
         return $this->paginate('POST', '/v2/catalog/search-catalog-objects', $query, 'objects');
     }
 
+    /**
+     * POST /v2/catalog/batch-retrieve, chunked at Square's 1,000-id cap,
+     * with related objects included (a variation's parent item). Ids that
+     * don't exist on this account are simply absent from the result.
+     *
+     * @param  array<int, string>  $objectIds
+     * @return array{objects: array<string, array>, related: array<string, array>} both keyed by object id
+     */
+    public function batchRetrieve(array $objectIds): array
+    {
+        $objects = [];
+        $related = [];
+
+        foreach (array_chunk(array_values(array_unique($objectIds)), 1000) as $chunk) {
+            $response = $this->client->request('POST', '/v2/catalog/batch-retrieve', [
+                'object_ids' => $chunk,
+                'include_related_objects' => true,
+            ]);
+
+            foreach ($response->json('objects') ?? [] as $object) {
+                $objects[$object['id']] = $object;
+            }
+
+            foreach ($response->json('related_objects') ?? [] as $object) {
+                $related[$object['id']] = $object;
+            }
+        }
+
+        return ['objects' => $objects, 'related' => $related];
+    }
+
     public function retrieveObject(string $id): SquareResponse
     {
         return $this->client->request('GET', "/v2/catalog/object/{$id}");

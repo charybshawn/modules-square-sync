@@ -53,6 +53,13 @@ class PushCatalogObjectJob implements ShouldQueue
 
         $mapping = SquareObjectMapping::forItem($this->productId)->first();
 
+        // The linked Square object is gone (see VerifySquareLinks). Don't
+        // update it -- that fails -- and don't create a replacement either:
+        // the admin decides whether to relink or unlink.
+        if ($mapping?->sync_status === 'orphaned') {
+            return;
+        }
+
         $isCreate = $mapping === null;
 
         $object = $this->buildCatalogObject($product, $mapping, $isCreate);

@@ -36,7 +36,7 @@ class QueueStockPush
         // Unlinked item -- there's nothing on Square to push a count to
         // yet (that's the catalog push's job, once it creates one). Not an
         // error, just nothing to do here.
-        if (! SquareObjectMapping::forItem($itemId)->exists()) {
+        if (! SquareObjectMapping::forItem($itemId)->syncable()->exists()) {
             return;
         }
 

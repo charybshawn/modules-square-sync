@@ -26,6 +26,8 @@ class SquareObjectMappingResource extends JsonResource
             'square_object_id' => $this->square_object_id,
             'square_object_type' => $this->square_object_type,
             'sync_status' => $this->sync_status,
+            'verification_status' => $this->verification_status,
+            'verified_at' => $this->verified_at?->toIso8601String(),
             'last_pushed_at' => $this->last_pushed_at?->toIso8601String(),
             'last_pulled_at' => $this->last_pulled_at?->toIso8601String(),
         ];

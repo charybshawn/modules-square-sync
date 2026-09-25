@@ -41,7 +41,7 @@ class ArchiveSquareCatalogObjectJob implements ShouldQueue
 
     public function handle(SquareClient $client, AuditLog $auditLog, LocalCatalog $catalog): void
     {
-        $mapping = SquareObjectMapping::forItem($this->productId)->first();
+        $mapping = SquareObjectMapping::forItem($this->productId)->syncable()->first();
 
         // Never synced to Square in the first place -- nothing to archive
         // or restore there.

@@ -7,6 +7,7 @@ use Cultpantry\SquareSync\Console\Commands\ImportSquareSales;
 use Cultpantry\SquareSync\Console\Commands\PullSquareCatalog;
 use Cultpantry\SquareSync\Console\Commands\PullSquareSalesCommand;
 use Cultpantry\SquareSync\Console\Commands\ReconcileSquareInventory;
+use Cultpantry\SquareSync\Console\Commands\VerifySquareLinksCommand;
 use Cultpantry\SquareSync\Contracts\AuditLog;
 use Cultpantry\SquareSync\Contracts\LocalCatalog;
 use Cultpantry\SquareSync\Contracts\LocalInventory;
@@ -70,6 +71,7 @@ class SquareSyncServiceProvider extends ServiceProvider
             ReconcileSquareInventory::class,
             PullSquareSalesCommand::class,
             ImportSquareSales::class,
+            VerifySquareLinksCommand::class,
         ]);
 
         AdminNav::register([

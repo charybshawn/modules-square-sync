@@ -121,7 +121,26 @@
       <section :class="SECTION">
         <div :class="SECTION_HEADER">
           <h2 class="text-lg font-medium text-gray-900 dark:text-white">Linked products</h2>
-          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Local products mapped to a Square catalog item.</p>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+            Local products mapped to a Square catalog item.
+            {{ summary.links_verified_at ? `Links last checked ${formatTimestamp(summary.links_verified_at)}.` : 'Links haven\'t been checked yet -- Run Sync Check to check them.' }}
+          </p>
+        </div>
+
+        <div v-if="summary.links_needing_attention > 0 || onlyNeedingAttention" class="px-4 md:px-6 pb-4">
+          <AdminAlert level="warning" :title="summary.links_needing_attention === 1 ? '1 link needs attention' : `${summary.links_needing_attention} links need attention`">
+            <p>
+              Missing links point at a Square item that no longer exists on this account, so they don't sync. Archived or
+              not-at-location items can't sell at your sync location. Fix them on Square, or unlink or relink them here.
+            </p>
+            <button
+              type="button"
+              class="tap-target-touch mt-2 inline-flex items-center font-medium underline"
+              @click="toggleNeedingAttention"
+            >
+              {{ onlyNeedingAttention ? 'Show all links' : 'Show only these links' }}
+            </button>
+          </AdminAlert>
         </div>
         <DataTable
           :columns="mappingColumns"
@@ -139,8 +158,8 @@
               <span class="min-w-0 flex-1 truncate text-sm font-medium text-gray-900 dark:text-white">
                 {{ item.product_title ?? '(deleted product)' }}
               </span>
-              <span :class="['shrink-0 inline-flex px-2 py-0.5 text-xs font-medium rounded-full capitalize', syncStatusClass(item.sync_status)]">
-                {{ item.sync_status }}
+              <span :class="['shrink-0 inline-flex px-2 py-0.5 text-xs font-medium rounded-full', linkStatus(item).class]">
+                {{ linkStatus(item).label }}
               </span>
             </div>
           </template>
@@ -151,8 +170,8 @@
           </template>
 
           <template #cell-sync_status="{ item }">
-            <span :class="['inline-flex px-2 py-1 text-xs font-medium rounded-full capitalize', syncStatusClass(item.sync_status)]">
-              {{ item.sync_status }}
+            <span :class="['inline-flex px-2 py-1 text-xs font-medium rounded-full', linkStatus(item).class]">
+              {{ linkStatus(item).label }}
             </span>
           </template>
 
@@ -422,6 +441,22 @@
           </div>
 
           <template v-else-if="syncResult">
+            <div v-if="syncResult.links.issues.length > 0" class="pb-4">
+              <h3 class="px-4 sm:px-6 pb-2 text-sm font-medium text-gray-900 dark:text-white">
+                {{ syncResult.links.issues.length === 1 ? '1 link needs attention' : `${syncResult.links.issues.length} links need attention` }}
+              </h3>
+              <ul class="divide-y divide-gray-100 dark:divide-gray-700 border-y border-gray-100 dark:border-gray-700">
+                <li v-for="issue in syncResult.links.issues" :key="issue.mapping_id" class="px-4 sm:px-6 py-3 flex items-center gap-3">
+                  <p class="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-white">{{ issue.product_title ?? '(deleted product)' }}</p>
+                  <span :class="['shrink-0 inline-flex px-2 py-0.5 text-xs font-medium rounded-full', ISSUE_BADGES[issue.status].class]">
+                    {{ ISSUE_BADGES[issue.status].label }}
+                  </span>
+                </li>
+              </ul>
+              <p class="px-4 sm:px-6 pt-2 text-xs text-gray-500 dark:text-gray-400">Fix them on Square, or unlink or relink them from Linked products.</p>
+            </div>
+
+            <h3 v-if="syncResult.links.issues.length > 0 && syncResult.checked > 0" class="px-4 sm:px-6 pb-2 text-sm font-medium text-gray-900 dark:text-white">Stock</h3>
             <p v-if="syncResult.checked === 0" class="px-4 sm:px-6 pb-6 text-sm text-gray-600 dark:text-gray-400">
               No linked products to check yet.
             </p>
@@ -526,6 +561,8 @@ interface MappingRow {
   square_object_id: string
   square_object_type: string
   sync_status: 'linked' | 'pending' | 'conflict' | 'orphaned'
+  verification_status: LinkIssue | 'ok' | null
+  verified_at: string | null
   last_pushed_at: string | null
   last_pulled_at: string | null
 }
@@ -604,6 +641,19 @@ interface SyncSummary {
   refunds_recorded: number
   stock_changes_applied: number
   last_sale_at: string | null
+  links_needing_attention: number
+  links_verified_at: string | null
+}
+
+type LinkIssue = 'missing' | 'archived' | 'not_at_location'
+
+interface LinkCheck {
+  checked: number
+  ok: number
+  missing: number
+  archived: number
+  not_at_location: number
+  issues: { mapping_id: number; product_id: number; product_title: string | null; square_object_id: string; status: LinkIssue }[]
 }
 
 interface Props {
@@ -613,13 +663,15 @@ interface Props {
   driftEvents: SquareEventRow[]
   recentActivity: ActivityGroup[]
   summary?: SyncSummary
+  onlyNeedingAttention?: boolean
 }
 
 // summary is newer than the rest of the page's props -- defaulted so the
 // page still renders if it's ever published ahead of the PHP that sends
 // it (a deploy that hasn't reloaded PHP yet), instead of crashing.
 const props = withDefaults(defineProps<Props>(), {
-  summary: () => ({ sales_recorded: 0, refunds_recorded: 0, stock_changes_applied: 0, last_sale_at: null }),
+  summary: () => ({ sales_recorded: 0, refunds_recorded: 0, stock_changes_applied: 0, last_sale_at: null, links_needing_attention: 0, links_verified_at: null }),
+  onlyNeedingAttention: false,
 })
 
 const { confirmDialog, askDialog } = useConfirmDialog()
@@ -645,8 +697,10 @@ const formatTimestamp = (value: string | null): string => {
 const heroHeadline = computed<HeroStat>(() => ({
   label: 'Linked products',
   value: props.mappings.meta.total,
-  hint: props.unmappedProducts.total > 0 ? `${props.unmappedProducts.total} not linked yet` : 'Every product is linked',
-  hintTone: props.unmappedProducts.total > 0 ? 'warning' : 'good',
+  hint: props.summary.links_needing_attention > 0
+    ? `${props.summary.links_needing_attention} need attention`
+    : props.unmappedProducts.total > 0 ? `${props.unmappedProducts.total} not linked yet` : 'Every product is linked',
+  hintTone: props.summary.links_needing_attention > 0 || props.unmappedProducts.total > 0 ? 'warning' : 'good',
 }))
 
 const heroStats = computed<HeroStat[]>(() => [
@@ -720,8 +774,33 @@ const mappingColumns: Column[] = [
 ]
 
 const mappingActions: Action[] = [
+  { name: 'relink', icon: 'link', color: 'indigo', label: 'Relink', show: (item: MappingRow) => isIssue(item.verification_status) },
   { name: 'unlink', icon: 'cancel', color: 'red', label: 'Unlink' },
 ]
+
+const ISSUE_BADGES: Record<LinkIssue, { label: string; class: string }> = {
+  missing: { label: 'Missing on Square', class: 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200' },
+  archived: { label: 'Archived on Square', class: 'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200' },
+  not_at_location: { label: 'Not at location', class: 'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200' },
+}
+
+const isIssue = (status: MappingRow['verification_status']): status is LinkIssue =>
+  status === 'missing' || status === 'archived' || status === 'not_at_location'
+
+// A verification problem outranks the plain sync status in the badge.
+const linkStatus = (item: MappingRow): { label: string; class: string } => {
+  if (isIssue(item.verification_status)) {
+    return ISSUE_BADGES[item.verification_status]
+  }
+
+  const label = item.sync_status.charAt(0).toUpperCase() + item.sync_status.slice(1)
+
+  return { label, class: syncStatusClass(item.sync_status) }
+}
+
+const toggleNeedingAttention = () => {
+  router.get(route('admin.square.index'), props.onlyNeedingAttention ? {} : { links: 'attention' }, { preserveScroll: true, preserveState: true })
+}
 
 const syncStatusClass = (status: MappingRow['sync_status']): string => {
   return {
@@ -739,9 +818,26 @@ const changeMappingsPage = (url: string | null) => {
 }
 
 const handleMappingAction = async (action: string, item: MappingRow) => {
+  const label = item.product_title ?? item.square_object_id
+
+  // Relink: drop the stale link, then pick the right Square item for the
+  // product in Link catalog items -- it's back in the product pickers.
+  if (action === 'relink') {
+    const confirmed = await confirmDialog({
+      title: 'Relink this product?',
+      message: `'${label}' is unlinked from its old Square item, then you choose the right one under Link catalog items.`,
+      confirmLabel: 'Unlink and Choose Item',
+    })
+
+    if (confirmed) {
+      router.post(route('admin.square.unlink', item.id), {}, { preserveScroll: true, onSuccess: () => openCatalog() })
+    }
+
+    return
+  }
+
   if (action !== 'unlink') return
 
-  const label = item.product_title ?? item.square_object_id
   const confirmed = await confirmDialog({
     title: 'Unlink from Square?',
     message: `'${label}' stops syncing with Square. Its sync history is kept, and it can be linked again later.`,
@@ -772,6 +868,7 @@ interface ReconcileResult {
   drifted: number
   corrected: number
   rows: DriftRow[]
+  links: LinkCheck
 }
 
 // sync() returns ReconcileInventoryDrift's structured result; the dialog
@@ -787,7 +884,6 @@ const syncChecking = ref(false)
 // several rows can be in flight independently.
 const resolvingProductIds = ref<Set<number>>(new Set())
 const resolvedRows = ref<Record<number, true>>({})
-const anyRowResolved = ref(false)
 const pushingAll = ref(false)
 
 const unresolvedRows = computed(() => syncResult.value?.rows.filter((row) => !resolvedRows.value[row.product_id]) ?? [])
@@ -821,7 +917,6 @@ const resolveDriftRow = async (row: DriftRow) => {
       source: 'local',
     })
     resolvedRows.value[row.product_id] = true
-    anyRowResolved.value = true
   } catch (error: any) {
     syncResultError.value = error?.response?.data?.error ?? `Couldn't push '${row.product_title}'.`
   } finally {
@@ -843,9 +938,9 @@ const pushAllRows = async () => {
 const closeSyncResultModal = () => {
   showSyncResultModal.value = false
 
-  if (anyRowResolved.value) {
-    anyRowResolved.value = false
-    // The pushes change mapping timestamps and the activity feed.
+  // Every sync check re-verifies links (statuses and the attention count
+  // change), and any pushes change timestamps and the activity feed.
+  if (syncResult.value !== null) {
     router.reload({ only: ['mappings', 'driftEvents', 'recentActivity', 'summary'] })
   }
 }
