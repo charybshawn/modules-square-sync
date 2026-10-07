@@ -65,12 +65,21 @@ class SquareSyncController extends Controller implements HasMiddleware
      * the product goes back to the "unmapped" panel, and its sync history
      * survives in case it's relinked later.
      */
-    public function unlink(SquareObjectMapping $mapping): RedirectResponse
+    public function unlink(SquareObjectMapping $mapping, AuditLog $auditLog): RedirectResponse
     {
         $this->authorize('delete', $mapping);
 
         $label = $mapping->localItem()?->title ?? $mapping->square_object_id;
+        $itemId = $mapping->localItem()?->id;
         $mapping->unlink();
+
+        $auditLog->record(
+            type: 'square.product_unlinked',
+            description: "Unlinked '{$label}' from Square",
+            itemId: $itemId,
+            actor: auth()->user(),
+            metadata: ['square_object_id' => $mapping->square_object_id, 'mapping_id' => $mapping->id],
+        );
 
         return redirect()->back()->with('success', "Unlinked '{$label}' from Square.");
     }
